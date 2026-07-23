@@ -1,0 +1,2 @@
+# FeiyangAgent
+通过gemini分析油管博主飞扬的预测方法总结得来的agent
