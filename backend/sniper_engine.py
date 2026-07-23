@@ -724,7 +724,7 @@ class SniperEngine:
         active_trades = [t for t in trades if t["status"] in ["pending", "filled", "tp1_hit"]]
         max_active = cfg.get("max_active_trades", 3)
 
-        # Check existing active trade for this symbol FIRST to update/replace unfilled pending order
+        # Check existing active trade for this symbol FIRST to update/replace unfilled pending order or handle reversal
         existing_active = [t for t in active_trades if t["symbol"] == symbol]
         if existing_active:
             for old_t in existing_active:
@@ -736,9 +736,6 @@ class SniperEngine:
                             exchange.cancel_order(old_t["live_order_id"], ccxt_symbol)
                             logger.info(f"[LiveSniper] 🔄 成功撤销旧的未成交 {ex_id.upper()} 挂单 #{old_t['live_order_id']} ({symbol})")
                         except Exception as cancel_e:
-                            # Cancel failed: keep the old order tracked and do NOT
-                            # replace it — a locally-cancelled order would no longer
-                            # be synced and could fill invisibly on the exchange.
                             logger.warning(f"[LiveSniper] ⚠️ 撤销旧挂单失败: {cancel_e} — 保留原挂单继续跟踪，跳过本次替换")
                             return None
 
@@ -746,13 +743,54 @@ class SniperEngine:
                     old_t["close_reason"] = f"🔄 大模型更新 {sig_type.upper()} 点位策略，原未成交挂单已自动撤单重置"
                     logger.info(f"[SniperEngine] Cancelled old pending trade for {symbol} to replace with new {sig_type.upper()} signal.")
                 else:
-                    logger.info(f"[SniperEngine] Symbol {symbol} already has a FILLED position ({old_t['status']}). Skipping new signal.")
-                    return None
+                    # Position is active (filled or tp1_hit)
+                    old_sig = old_t["signal_type"]
+                    if old_sig == sig_type:
+                        logger.info(f"[SniperEngine] Symbol {symbol} already has a FILLED position in SAME direction ({sig_type}). Keeping active position, skipping duplicate signal.")
+                        return None
+                    else:
+                        # 🔄 REVERSAL DETECTED! (e.g. Existing SHORT vs New High-Confidence LONG)
+                        close_px = float(current_price) if (current_price and float(current_price) > 0) else float(old_t.get("current_price", 0.0))
+                        if close_px <= 0:
+                            close_px = float(old_t.get("actual_entry", 0.0))
 
-        # Re-evaluate active positions count AFTER cancelling existing pending order for this symbol
-        # Allow creating pending trade in trades list so all diagnostic signals are recorded in pending table
-        # Max active trade limit is enforced during order fill execution
+                        # Live market close via CCXT if live trade
+                        if old_t.get("is_live"):
+                            rem_amount = round(old_t["position_size_usd"] * (0.5 if old_t.get("tp1_partial_closed") else 1.0) / old_t.get("actual_entry", 1.0), 4)
+                            self._try_live_close(old_t, symbol, old_sig, rem_amount, reason=f"🔄 触发高置信度 ({conf}/10分) 反向 {sig_type.upper()} 信号，市价平仓翻向", alert_tag="reversal", current_price=close_px)
 
+                        # Calculate final net PnL for old_t
+                        lev = old_t.get("leverage", 1)
+                        margin = old_t.get("margin_usd", 0.0)
+                        actual_entry = old_t.get("actual_entry") or old_t.get("planned_entry", close_px)
+                        rem_ratio = 0.5 if old_t.get("tp1_partial_closed") else 1.0
+
+                        if old_sig == "long":
+                            raw_pct = (close_px - actual_entry) / actual_entry * lev
+                        else:
+                            raw_pct = (actual_entry - close_px) / actual_entry * lev
+
+                        taker_fee, _, _ = self._fee_rates()
+                        exit_fee = self._record_fee(old_t, old_t.get("position_size_usd", 0.0) * rem_ratio, taker_fee)
+                        leg_net = round(margin * rem_ratio * raw_pct - exit_fee, 2)
+
+                        final_pnl = round(old_t.get("pnl_usd", 0.0) + leg_net, 2)
+                        old_t["pnl_usd"] = final_pnl
+                        old_t["pnl_percent"] = round((final_pnl / margin) * 100.0, 2) if margin > 0 else 0.0
+                        old_t["status"] = "closed_tp" if final_pnl >= 0 else "closed_sl"
+                        old_t["closed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        old_t["close_reason"] = f"🔄 触发高置信度 ({conf}/10分) 反向 {sig_type.upper()} 信号，自动平仓旧 {old_sig.upper()} 仓位锁定利润离场"
+
+                        if not old_t.get("is_live"):
+                            cfg["paper_account_balance"] = round(cfg.get("paper_account_balance", 10000.0) + leg_net, 2)
+
+                        logger.info(f"[SniperEngine] 🔄 Reversal triggered for {symbol}: closed old {old_sig.upper()} position at ${close_px}, PnL=${final_pnl}")
+                        self._send_notification(
+                            f"🔄 狙击智能平仓翻向通知：{symbol}",
+                            f"🔄 *【反向信号平仓翻向通知】*\n币种：{symbol}\n旧持仓：{old_sig.upper()} -> 现信号：{sig_type.upper()} ({conf}/10分)\n平仓触发价：${close_px}\n实现盈亏：${final_pnl} USD ({old_t['pnl_percent']}%)\n原因：{old_t['close_reason']}"
+                        )
+
+        # Re-evaluate active positions count AFTER handling existing trades for this symbol
         entry_zone = json_signal.get("entry_zone") or {}
         raw_min = entry_zone.get("min")
         raw_max = entry_zone.get("max")
@@ -770,9 +808,7 @@ class SniperEngine:
         if not tp_list or sl <= 0:
             return None
 
-        # 🛡️ Hard signal-geometry validation. The LLM sometimes emits
-        # self-contradictory levels; previously these were only logged as
-        # warnings and still traded. Reject them here instead.
+        # 🛡️ Hard signal-geometry validation.
         if sig_type == "long":
             geometry_ok = (sl < entry_min) and (tp_list[0] > entry_max)
             reject_reason = f"多头要求 SL({sl}) < 入场区下限({entry_min}) 且 TP1({tp_list[0]}) > 入场区上限({entry_max})"
@@ -783,12 +819,30 @@ class SniperEngine:
             logger.warning(f"[SniperEngine] Rejected {sig_type.upper()} signal for {symbol}: invalid geometry. {reject_reason}")
             return None
 
+        # Check current price vs entry zone -> determine whether to place pending limit order or fill INSTANTLY
+        curr_px = float(current_price) if (current_price and float(current_price) > 0) else 0.0
+        
+        # Check if current price is already invalidated (past stop loss)
+        if curr_px > 0:
+            if (sig_type == "long" and curr_px <= sl) or (sig_type == "short" and curr_px >= sl):
+                logger.warning(f"[SniperEngine] Rejected {sig_type.upper()} signal for {symbol}: current price ${curr_px} already breached SL ${sl}.")
+                return None
+
+        # Check if current price is ALREADY inside entry_zone or better -> Instant Market Fill!
+        instant_fill = False
+        if curr_px > 0:
+            if sig_type == "long" and curr_px <= entry_max and curr_px > sl:
+                instant_fill = True
+            elif sig_type == "short" and curr_px >= entry_min and curr_px < sl:
+                instant_fill = True
+
         balance = cfg.get("live_account_balance" if mode == "live" else "paper_account_balance", 10000.0)
         risk_pct = cfg.get("risk_per_trade_percent", 2.0)
         max_lev = cfg.get("max_leverage", 15)
 
+        exec_entry = curr_px if instant_fill else planned_entry
         pos_val, margin, lev = self.calculate_trade_params(
-            balance, risk_pct, planned_entry, sl, conf, max_lev
+            balance, risk_pct, exec_entry, sl, conf, max_lev
         )
 
         trade_id = f"trade-{int(time.time() * 1000)}"
@@ -796,12 +850,12 @@ class SniperEngine:
             "id": trade_id,
             "symbol": symbol,
             "signal_type": sig_type,
-            "status": "pending",
+            "status": "filled" if instant_fill else "pending",
             "confidence_score": conf,
             "entry_min": entry_min,
             "entry_max": entry_max,
             "planned_entry": planned_entry,
-            "actual_entry": None,
+            "actual_entry": exec_entry if instant_fill else None,
             "stop_loss": sl,
             "initial_stop_loss": sl,
             "take_profit_targets": tp_list,
@@ -812,7 +866,7 @@ class SniperEngine:
             "closed_at": None,
             "pnl_usd": 0.0,
             "pnl_percent": 0.0,
-            "close_reason": "",
+            "close_reason": f"⚡ 市价即时吃单成单（当前价 ${curr_px} 处于吃单区间 [{entry_min}, {entry_max}] 内）" if instant_fill else "",
             "tp1_partial_closed": False,
             "is_live": (mode == "live"),
             "live_order_id": None,
@@ -820,6 +874,17 @@ class SniperEngine:
             "protective_sl_order_id": None,
             "fees_usd": 0.0
         }
+
+        if instant_fill and not new_trade.get("is_live"):
+            _, taker_fee, _ = self._fee_rates()
+            entry_fee = self._record_fee(new_trade, pos_val, taker_fee)
+            cfg["paper_account_balance"] = round(cfg.get("paper_account_balance", 10000.0) - entry_fee, 4)
+            logger.info(f"[SniperEngine] ⚡ Instant Market Fill for {symbol} at ${curr_px} (Entry Zone [{entry_min}, {entry_max}]).")
+
+            self._send_notification(
+                f"⚡ 狙击模拟即时吃单成单：{symbol}",
+                f"⚡ *【即时吃单成单通知】*\n币种：{symbol} ({sig_type.upper()})\n当前市价：${curr_px}（在吃单区间 [{entry_min}, {entry_max}] 内，免去等待）\n建仓价：${curr_px}\n杠杆：{lev}x | 保证金：${margin}\n防守位：${sl} | 目标位：${tp_list[0]}"
+            )
 
         # REAL LIVE TRADING CCXT EXECUTION
         if mode == "live":
@@ -867,23 +932,25 @@ class SniperEngine:
                         "takeProfit": str(tp_list[0])
                     }
 
+                order_type = "market" if instant_fill else "limit"
+                order_price = None if instant_fill else limit_price
                 try:
                     live_res = exchange.create_order(
                         symbol=ccxt_symbol,
-                        type="limit",
+                        type=order_type,
                         side=side,
                         amount=amount,
-                        price=limit_price,
+                        price=order_price,
                         params=order_params
                     )
                 except Exception as ord_e1:
-                    logger.warning(f"[LiveSniper] Primary limit order attempt with Hedge/Algo params failed ({ord_e1}), retrying One-Way clean limit order...")
+                    logger.warning(f"[LiveSniper] Primary {order_type} order attempt with Hedge/Algo params failed ({ord_e1}), retrying clean {order_type} order...")
                     live_res = exchange.create_order(
                         symbol=ccxt_symbol,
-                        type="limit",
+                        type=order_type,
                         side=side,
                         amount=amount,
-                        price=limit_price,
+                        price=order_price,
                         params={}
                     )
 

@@ -466,8 +466,7 @@ def get_monitor_logs():
 def clear_monitor_logs():
     with monitor_logs_lock:
         monitor_logs.clear()
-        log_monitor_event("运行日志已清空。正在持续监控中...")
-    return {"status": "success"}
+    return {"status": "success", "logs": []}
 
 # Short-TTL cache for /api/market responses. The frontend polls this endpoint
 # every 60s; without a cache each poll re-downloads 5 timeframes x 200 candles

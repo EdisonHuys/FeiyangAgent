@@ -126,6 +126,7 @@ export default function App() {
   }, [monitorLogs]);
 
   const handleClearLogs = () => {
+    setMonitorLogs([]);
     fetch(`${API_BASE}/api/monitor-logs/clear`, { method: 'POST' })
       .then(res => res.json())
       .then(data => {
