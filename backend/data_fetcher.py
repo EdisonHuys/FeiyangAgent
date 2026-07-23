@@ -44,6 +44,9 @@ class DataFetcher:
         self.exchanges = {}
         
         proxy_url = detect_local_vpn_proxy()
+        self.proxy_url = proxy_url
+        self.proxies = {'http': proxy_url, 'https': proxy_url} if proxy_url else None
+
         if proxy_url:
             os.environ['HTTP_PROXY'] = proxy_url
             os.environ['HTTPS_PROXY'] = proxy_url

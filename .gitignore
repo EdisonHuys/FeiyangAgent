@@ -28,6 +28,8 @@ pnpm-debug.log*
 
 # Sensitive Config & Environment Files
 config.yaml
+trades.json
+backend/trades.json
 .env
 .env.*
 *.local

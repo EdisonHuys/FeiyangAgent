@@ -6,7 +6,7 @@
 
 **FeiyangAgent** 是一个基于加密货币市场数据的自动化智能体（Agent）预测与交易诊断系统。
 
-系统能够自动拉取币安多维度时间周期的数据，在本地实时计算技术指标（MA、EMA、Bollinger Bands）与斐波那契结构位，并将经过清洗压缩后的轻量级结构化载荷（JSON Payload）提供给大语言模型（LLM）。LLM 严格遵循分析师“飞扬”防守型右侧交易逻辑，输出结构化交易信号与诊断报告，同时支持推送至 Telegram、Server酱或 Bark 等通知渠道。
+系统能够自动拉取币安等交易所多维度时间周期的数据，在本地实时计算技术指标（MA、EMA、Bollinger Bands）与斐波那契结构位，并将经过清洗压缩后的轻量级结构化载荷（JSON Payload）提供给大语言模型（LLM）。LLM 严格遵循分析师“飞扬”防守型右侧交易逻辑，输出结构化交易信号与诊断报告，同时配合内置的 **🎯 AI 智能狙击交易引擎** 自动执行模拟盘/实盘交易，并推送至 Telegram、Server酱或 Bark 等通知渠道。
 
 为了提升交互体验，系统提供基于 `pywebview` + `React` + `TradingView` 打造的原生 macOS 桌面客户端。
 
@@ -16,9 +16,14 @@
 
 - **桌面客户端（Native GUI）**：采用 `pywebview` 封装原生的 macOS Cocoa 窗口，内置系统 Dock 栏图标与响应式界面，无需浏览器交互。
 - **交互式 K 线图表**：集成 TradingView 高性能 K 线图，支持实时缩放拖拽与多指标动态叠加（MA5/10/30、EMA55、布林带）。
-- **可视化配置管理**：内置配置面板，可直接在 GUI 界面中动态配置 OpenAI / DeepSeek / Gemini API Key、自定义 Base URL、模型名称及推送渠道 Token，即时生效。
+- **🎯 智能狙击控制台 (Sniper Engine)**：
+  - **模拟盘与实盘双模式**：支持模拟盘仿真推演及 CCXT 实盘合约（Binance / OKX / Bybit）真实下单。
+  - **智能风控与动态杠杆**：依据 LLM 诊断置信度（Confidence Score）智能匹配 35x~70x 杠杆，自动管理仓位价值与保证金比例。
+  - **10U 微型资金适配 (10U Micro-Capital Auto-Protector)**：专门针对 $10~$20U 小资金账户，自动优化调整名义价值，突破交易所最小交易限制。
+  - **双保险自动风控与推损保本**：达到 TP1 自动平仓 50% 锁定收益，并**自动上移防守止损线至建仓成本价**（锁定无风险持仓）；触及止损自动触发市价平仓双保险。
+- **可视化配置管理**：内置配置面板，可直接在 GUI 界面中动态配置 OpenAI / DeepSeek / Gemini API Key、自定义 Base URL、实盘 API Key / Secret 及推送渠道 Token，即时生效。
 - **多周期共振诊断**：覆盖 月线(1M)、周线(1W)、日线(1D)、4小时(4h)、1小时(1h) 多维周期，智能判断关键防守位与支撑阻力。
-- **多渠道消息推送**：行情诊断完成后，自动将防守思路与分析报告推送至 Telegram 机器人、Server酱或 Bark。
+- **实时盯盘与多渠道推送**：提供 24H 实时盯盘运行日志控制台；行情诊断、埋伏挂单、履约建仓、阶段止盈推损保本及风控平仓全流程自动推送至 Telegram、Server酱或 Bark。
 
 ---
 
@@ -27,21 +32,25 @@
 ```text
 FeiyangAgent/
 ├── backend/                  # Python 后端核心逻辑
-│   ├── app.py                # FastAPI 服务端（API 接口、K线数据、设置管理）
+│   ├── app.py                # FastAPI 服务端（API 接口、K线数据、设置管理、盯盘服务）
 │   ├── data_fetcher.py       # CCXT 交易所数据拉取与多周期处理
 │   ├── indicators.py         # 技术指标与 Fibonacci 极值点位计算
 │   ├── agent.py              # LLM Prompt 构造、推理查询与交易逻辑校验
+│   ├── sniper_engine.py      # 🎯 AI 智能狙击交易引擎（模拟盘/实盘、仓位风控、推损保本）
+│   ├── trades.json           # 狙击交易记录与持仓状态持久化文件
 │   └── notifier.py           # Telegram / Server酱 / Bark 消息推送
 ├── frontend/                 # 桌面客户端前端 (Vite + React)
 │   ├── dist/                 # 编译打包后的前端静态资源
 │   ├── src/
 │   │   ├── components/
-│   │   │   ├── KLineChart.jsx    # TradingView 图表组件
-│   │   │   └── SettingsPanel.jsx # 密钥与参数配置面板
-│   │   ├── App.jsx           # 主界面布局与诊断卡片渲染
-│   │   └── index.css         # 暗黑高质感 CSS 样式系统
+│   │   │   ├── KLineChart.jsx      # TradingView 图表组件
+│   │   │   ├── SettingsPanel.jsx   # 密钥与核心参数配置面板
+│   │   │   └── SniperDashboard.jsx # 🎯 智能狙击交易控制台面板
+│   │   ├── App.jsx             # 主界面布局、盯盘日志与诊断卡片渲染
+│   │   └── index.css           # 暗黑高质感 CSS 样式系统
 │   ├── package.json
 │   └── vite.config.js
+├── assets/                   # 应用图标与静态资源 (app_icon.icns等)
 ├── main.py                   # 统一启动入口（支持 CLI、Daemon、--gui 模式）
 ├── build_app.py              # PyInstaller 一键编译与 macOS .app 打包脚本
 ├── requirements.txt          # Python 依赖清单
@@ -94,7 +103,7 @@ pip install pandas-ta --no-deps
 ```bash
 python main.py --gui
 ```
-运行后将弹出一体化原生桌面窗口，您可在“设置”面板中填入您的 LLM API Key 并开始行情诊断。
+运行后将弹出一体化原生桌面窗口，您可在“核心配置参数”面板中填入您的 LLM API Key 并开始行情诊断与狙击交易。
 
 #### 选项 B：CLI 命令行调试运行（Dry-Run）
 
@@ -142,7 +151,16 @@ notifications:
     chat_id: "YOUR_CHAT_ID"
 ```
 
-> **提示**：API Key 等敏感秘钥建议存入同目录下的 `.env` 文件中或直接在应用设置面板中填写，系统会自动写入本地加密环境。
+> **提示**：API Key 等敏感秘钥建议在应用“核心配置参数”面板或“智能狙击控制台”面板中直接填写，系统会自动写入本地持久化文件中。
+
+---
+
+## 🎯 智能狙击引擎与实盘配置
+
+系统内置的狙击交易引擎支持两种模式：
+
+1. **模拟盘模式 (Paper Trading)**：使用初始虚拟资金（如 $10,000 USD）进行无风险实战推演，自动记录胜率、盈亏比与回撤曲线。
+2. **实盘合约模式 (Live Contract)**：在狙击控制台配置 Binance / OKX / Bybit 的 API Key & Secret 即可开启动态杠杆合约自动交易。系统包含双保险紧急市价平仓机制与 10U 小资金微型仓位适配保障。
 
 ---
 
@@ -178,4 +196,4 @@ notifications:
 
 ## ⚠️ 免责声明
 
-本系统输出的所有诊断报告与交易信号仅供技术研究与参考，**不构成任何投资建议或交易依据**。市场有风险，投资需谨慎。
+本系统输出的所有诊断报告与交易信号仅供技术研究与参考，**不构成任何投资建议或交易依据**。实盘交易存在极高风险，请严格控制资金风控。

@@ -102,17 +102,21 @@ def calculate_fibonacci_levels(df_1d, lookback=100):
         "swing_low": float(low),
         "upward_levels": {
             "0.382": float(low + 0.382 * diff),
+            "0.5": float(low + 0.5 * diff),
             "0.618": float(low + 0.618 * diff),
+            "0.786": float(low + 0.786 * diff),
+            "1.272": float(low + 1.272 * diff),
             "1.618": float(low + 1.618 * diff),
-            "2.618": float(low + 2.618 * diff),
-            "3.618": float(low + 3.618 * diff)
+            "2.618": float(low + 2.618 * diff)
         },
         "downward_levels": {
             "0.382": float(high - 0.382 * diff),
+            "0.5": float(high - 0.5 * diff),
             "0.618": float(high - 0.618 * diff),
+            "0.786": float(high - 0.786 * diff),
+            "1.272": float(high - 1.272 * diff),
             "1.618": float(high - 1.618 * diff),
-            "2.618": float(high - 2.618 * diff),
-            "3.618": float(high - 3.618 * diff)
+            "2.618": float(high - 2.618 * diff)
         }
     }
     return levels

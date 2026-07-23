@@ -13,10 +13,18 @@ from dotenv import load_dotenv
 import sys
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from data_fetcher import DataFetcher
-from indicators import calculate_indicators, calculate_fibonacci_levels, clean_and_compress
-from agent import FeiyangAgent
-from notifier import Notifier
+try:
+    from data_fetcher import DataFetcher
+    from indicators import calculate_indicators, calculate_fibonacci_levels, clean_and_compress
+    from agent import FeiyangAgent
+    from notifier import Notifier
+    from sniper_engine import SniperEngine
+except ImportError:
+    from backend.data_fetcher import DataFetcher
+    from backend.indicators import calculate_indicators, calculate_fibonacci_levels, clean_and_compress
+    from backend.agent import FeiyangAgent
+    from backend.notifier import Notifier
+    from backend.sniper_engine import SniperEngine
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("FeiyangBackend")
@@ -65,6 +73,8 @@ CONFIG_PATH = os.path.join(root_dir, "config.yaml")
 ENV_PATH = os.path.join(root_dir, ".env")
 STATE_FILE_PATH = os.path.join(root_dir, "last_signals.json")
 
+sniper_engine = SniperEngine(root_dir)
+
 def load_signals_state() -> dict:
     if os.path.exists(STATE_FILE_PATH):
         try:
@@ -90,6 +100,10 @@ def process_signal_evaluation(symbol: str, payload: dict, json_signal: dict, mar
         current_price = float(payload.get("current_price", 0.0))
     except (ValueError, TypeError):
         current_price = 0.0
+
+    # Trigger active sniper positions update against current price
+    if current_price > 0:
+        sniper_engine.check_market_prices({symbol: current_price})
 
     sig_type = str(json_signal.get("signal_type", "wait")).lower()
     conf = json_signal.get("confidence_score", 0)
@@ -182,6 +196,15 @@ def process_signal_evaluation(symbol: str, payload: dict, json_signal: dict, mar
                         if shift_min > 0.01 or shift_max > 0.01:
                             should_push = True
                             push_reason = f"🔄 诊断模型显著调整了吃单点位"
+
+        # Also pass valid signal to Sniper Engine
+        try:
+            sniper_trade = sniper_engine.process_new_signal(symbol, current_price, json_signal, markdown_report)
+            if sniper_trade:
+                mode_str = sniper_engine.get_config().get("mode", "paper").upper()
+                log_monitor_event(f"🎯 [狙击系统] [{mode_str}] 成功自动挂单/成交 {symbol} {sig_type.upper()} 计划！（保证金 ${sniper_trade['margin_usd']}，杠杆 {sniper_trade['leverage']}x）")
+        except Exception as se:
+            logger.warning(f"Sniper engine order placement error: {se}")
 
         if should_push:
             logger.info(f"[{source_tag}] Pushing alert for {symbol} ({sig_type.upper()}): {push_reason}")
@@ -588,6 +611,114 @@ def test_llm_connection(req: LLMTestRequest):
             "message": f"连接测试失败：{str(e)}"
         }
 
+# --- Precision Sniper System API Routes ---
+class SniperConfigRequest(BaseModel):
+    mode: Optional[str] = None
+    account_balance: Optional[float] = None
+    risk_per_trade_percent: Optional[float] = None
+    max_active_trades: Optional[int] = None
+    min_confidence: Optional[int] = None
+    leverage_mode: Optional[str] = None
+    min_leverage: Optional[int] = None
+    max_leverage: Optional[int] = None
+    fixed_leverage: Optional[int] = None
+    live_exchange: Optional[str] = None
+    live_api_key: Optional[str] = None
+    live_secret: Optional[str] = None
+    live_passphrase: Optional[str] = None
+    live_trading_mode: Optional[str] = None
+
+@app.get("/api/sniper/dashboard")
+def get_sniper_dashboard():
+    return sniper_engine.get_dashboard_data()
+
+@app.get("/api/sniper/trades")
+def get_sniper_trades():
+    return {
+        "status": "success",
+        "trades": sniper_engine.get_trades()
+    }
+
+@app.post("/api/sniper/config")
+def update_sniper_config(req: SniperConfigRequest):
+    new_cfg = {k: v for k, v in req.dict().items() if v is not None}
+    updated = sniper_engine.update_config(new_cfg)
+    mode_str = updated.get("mode", "paper").upper()
+    log_monitor_event(f"⚙️ [狙击系统配置已更新] 运作模式：{mode_str}，单笔风控上限：{updated.get('risk_per_trade_percent')}%，杠杆模式：{updated.get('leverage_mode')}")
+    return {
+        "status": "success",
+        "config": updated
+    }
+
+class CloseTradeRequest(BaseModel):
+    trade_id: str
+
+@app.post("/api/sniper/close-trade")
+def close_trade_manually(req: CloseTradeRequest):
+    return sniper_engine.close_position_manually(req.trade_id)
+
+class ResetPaperRequest(BaseModel):
+    initial_balance: float = 10000.0
+
+@app.post("/api/sniper/reset-paper")
+def reset_paper_trading(req: ResetPaperRequest):
+    res = sniper_engine.reset_paper_data(req.initial_balance)
+    log_monitor_event(f"🗑️ [模拟盘重置成功] 已清空模拟持仓记录，重置初始模拟资金为 ${req.initial_balance} USD！")
+    return res
+
+class ExchangeTestRequest(BaseModel):
+    exchange_id: str
+    api_key: str
+    secret: str
+    passphrase: Optional[str] = ""
+
+@app.post("/api/sniper/test-exchange-api")
+def test_exchange_api(req: ExchangeTestRequest):
+    """
+    Test connectivity to the selected exchange API and fetch live account balance.
+    """
+    import ccxt
+    fetcher = DataFetcher(exchange_id=req.exchange_id)
+    try:
+        ex_class = getattr(ccxt, req.exchange_id.lower())
+        ex_params = {
+            "apiKey": req.api_key.strip(),
+            "secret": req.secret.strip(),
+            "enableRateLimit": True,
+            "timeout": 10000
+        }
+        if req.passphrase and req.passphrase.strip():
+            ex_params["password"] = req.passphrase.strip()
+        if getattr(fetcher, 'proxies', None):
+            ex_params["proxies"] = fetcher.proxies
+
+        ex = ex_class(ex_params)
+        balance = ex.fetch_balance()
+        usdt_free = balance.get("free", {}).get("USDT", 0.0)
+        usdt_total = balance.get("total", {}).get("USDT", 0.0)
+
+        # Also update sniper account balance to match real live balance if connected successfully
+        sniper_engine.update_config({
+            "live_exchange": req.exchange_id,
+            "live_api_key": req.api_key,
+            "live_secret": req.secret,
+            "live_passphrase": req.passphrase,
+            "account_balance": round(usdt_total, 2)
+        })
+
+        return {
+            "status": "success",
+            "message": f"实盘 API 验证成功！连通交易所：{req.exchange_id.upper()}，合约账户可用 USDT 余额：${round(usdt_free, 2)}，总资产：${round(usdt_total, 2)}",
+            "usdt_free": usdt_free,
+            "usdt_total": usdt_total
+        }
+    except Exception as e:
+        logger.error(f"Exchange API test failed: {e}")
+        return {
+            "status": "error",
+            "message": f"实盘 API 验证失败：{str(e)}。请检查 Key / Secret 及网络 VPN 代理。"
+        }
+
 class NotificationTestRequest(BaseModel):
     notify_channels: List[Any]
     telegram_bot_token: Optional[Any] = ""
@@ -681,24 +812,43 @@ def test_notification(req: NotificationTestRequest):
 def start_background_monitor():
     import time
     from threading import Thread
-    from notifier import Notifier
     
-    def monitor_loop():
-        try:
-            print("MONITOR_LOOP THREAD STARTED!!!")
-            logger.info("24H Background Monitor Loop started.")
-            log_monitor_event("24H 自动盯盘后台服务已启动。正在持续监控市场...")
-        except Exception as ex:
-            print("CRITICAL ERROR IN MONITOR_LOOP STARTUP:", ex)
-            import traceback
-            traceback.print_exc()
-            return
-            
-        last_signals = {} # {symbol: signal_type}
-        
-        # Let the server bind and start up fully first
+    # 1. Thread 1: 10-Second Fast Price Check & Fill Trigger Loop
+    def fast_price_check_loop():
+        time.sleep(5)
+        logger.info("Fast Price Check Loop (10s) started.")
+        while True:
+            try:
+                yaml_cfg = load_yaml_config()
+                symbols = yaml_cfg.get("symbols", ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "ZEC/USDT"])
+                exchange_id = yaml_cfg.get("exchange", "binance")
+                
+                sniper_cfg = sniper_engine.get_config()
+                sniper_mode = sniper_cfg.get("mode", "off")
+                
+                if sniper_mode != "off" and symbols:
+                    fetcher = DataFetcher(exchange_id=exchange_id)
+                    prices_dict = {}
+                    for sym in symbols:
+                        try:
+                            df_1h = fetcher.fetch_ohlcv(sym, timeframe="1h", limit=3)
+                            if df_1h is not None and not df_1h.empty:
+                                prices_dict[sym] = float(df_1h['close'].iloc[-1])
+                        except Exception:
+                            pass
+                    
+                    if prices_dict:
+                        sniper_engine.check_market_prices(prices_dict)
+            except Exception as e:
+                logger.warning(f"[FastPriceCheck] Error in 10s loop: {e}")
+            time.sleep(10)
+
+    # 2. Thread 2: 1-Hour LLM Deep Diagnostic Loop
+    def hourly_llm_monitor_loop():
         time.sleep(10)
-        
+        logger.info("1-Hour LLM Diagnostic Monitor Loop started.")
+        log_monitor_event("🤖 1小时大模型诊断后台服务已启动。建议降低掉无用 API 消耗。")
+
         while True:
             try:
                 yaml_cfg = load_yaml_config()
@@ -716,13 +866,15 @@ def start_background_monitor():
                 api_key = os.getenv("OPENAI_API_KEY")
                 api_base = os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1")
                 
-                # Only analyze if notifications are enabled and API Key is configured
-                if enabled and api_key:
-                    log_monitor_event(f"🔄 启动新一轮自动盯盘轮询，监控币对：{', '.join(symbols)}")
-                    logger.info(f"[24H Monitor] Starting cycle for symbols: {symbols}")
+                sniper_cfg = sniper_engine.get_config()
+                sniper_active = (sniper_cfg.get("mode", "off") != "off")
+                
+                if (enabled or sniper_active) and api_key:
+                    log_monitor_event(f"🔄 [1小时定时诊断] 启动新一轮大模型深度诊盘，目标币种：{', '.join(symbols)}")
+                    logger.info(f"[1H LLM Monitor] Starting hourly cycle for symbols: {symbols}")
                     for symbol in symbols:
                         try:
-                            log_monitor_event(f"📊 [正在诊断] 币对：{symbol}... 正在拉取 Binance / OKX / Bybit 实时行情并计算指标")
+                            log_monitor_event(f"📊 [正在诊断] 币对：{symbol}... 正在拉取多周期 K 线并计算指标")
                             fetcher = DataFetcher(exchange_id=exchange_id)
                             timeframes = yaml_cfg.get("timeframes", ["1M", "1W", "1D", "4h", "1h"])
                             raw_dfs = fetcher.fetch_all_timeframes(symbol, timeframes, limit=100)
@@ -736,7 +888,6 @@ def start_background_monitor():
                                 
                             daily_df = processed_dfs.get("1D")
                             fib_levels = calculate_fibonacci_levels(daily_df, lookback=fib_lookback)
-                            
                             payload = clean_and_compress(processed_dfs, fib_levels, symbol)
                             
                             agent = FeiyangAgent(
@@ -747,23 +898,30 @@ def start_background_monitor():
                                 max_tokens=max_tokens
                             )
                             json_signal, markdown_report = agent.analyze(payload)
-                            process_signal_evaluation(symbol, payload, json_signal, markdown_report, yaml_cfg, source_tag="24H盯盘")
+                            process_signal_evaluation(symbol, payload, json_signal, markdown_report, yaml_cfg, source_tag="1H定时诊断")
                         except Exception as inner_e:
-                            logger.error(f"[24H Monitor] Error analyzing {symbol}: {inner_e}")
+                            logger.error(f"[1H LLM Monitor] Error analyzing {symbol}: {inner_e}")
                             log_monitor_event(f"❌ [诊断失败] {symbol}。原因：{str(inner_e)}")
-                    log_monitor_event("😴 本轮自选盯盘完成。后台线程将休眠等待 15 分钟，随后自动启动下一轮轮询...")
+                    log_monitor_event("😴 本轮 1 小时诊断完成，伏击表格已更新。后台将休眠 1 小时，价格监听（10秒）持续进行中...")
+                    
+                    # Sleep for 1 hour (3600 seconds), checking every 10 seconds
+                    for _ in range(360):
+                        time.sleep(10)
                 else:
-                    log_monitor_event("⏳ 自动盯盘后台运行中（未开启通知推送或未配置 API Key，将暂不执行分析流程，请前往“核心配置参数”页面检查）")
+                    log_monitor_event("⏳ 自动盯盘后台运行中（未开启通知推送/狙击引擎未启动或未配置 API Key，请前往配置页面检查）")
+                    time.sleep(30)
             except Exception as e:
-                logger.error(f"[24H Monitor] Loop error: {e}")
+                logger.error(f"[1H LLM Monitor] Loop error: {e}")
                 log_monitor_event(f"⚠️ [盯盘异常] 异常信息：{str(e)}")
-                
-            # Wait 15 minutes between monitoring cycles to prevent Binance rate limits
-            time.sleep(900)
+                time.sleep(30)
 
-    t = Thread(target=monitor_loop)
-    t.daemon = True
-    t.start()
+    t_price = Thread(target=fast_price_check_loop)
+    t_price.daemon = True
+    t_price.start()
+
+    t_llm = Thread(target=hourly_llm_monitor_loop)
+    t_llm.daemon = True
+    t_llm.start()
 
 @app.on_event("startup")
 def startup_event():

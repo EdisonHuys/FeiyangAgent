@@ -22,6 +22,7 @@ from backend.data_fetcher import DataFetcher
 from backend.indicators import calculate_indicators, calculate_fibonacci_levels, clean_and_compress
 from backend.agent import FeiyangAgent
 from backend.notifier import Notifier
+from backend.sniper_engine import SniperEngine
 
 # Configure logging
 logging.basicConfig(
@@ -182,7 +183,7 @@ def main():
         window = webview.create_window(
             title="飞扬多周期量化交易终端",
             url="http://127.0.0.1:8000",
-            width=1280,
+            width=1472,
             height=850,
             resizable=True
         )

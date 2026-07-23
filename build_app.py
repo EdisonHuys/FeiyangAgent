@@ -24,6 +24,7 @@ def build():
     pyinstaller_args = [
         'main.py',                         # Entry point
         '--name=FeiyangAgent',             # App name
+        '--icon=assets/icon.icns',         # macOS App Icon
         '--noconfirm',                     # Overwrite output directory without confirmation
         '--windowed',                      # Windowed / GUI mode (no console popup)
         '--noconsole',                     # Don't show shell console

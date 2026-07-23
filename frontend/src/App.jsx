@@ -1,12 +1,13 @@
 import React, { useState, useEffect } from 'react';
-import { AreaChart, Settings, Play, ShieldAlert, CheckCircle2, TrendingUp, HelpCircle } from 'lucide-react';
+import { AreaChart, Settings, Play, ShieldAlert, CheckCircle2, TrendingUp, HelpCircle, Target } from 'lucide-react';
 import KLineChart from './components/KLineChart';
 import SettingsPanel from './components/SettingsPanel';
+import SniperDashboard from './components/SniperDashboard';
 
 const API_BASE = window.location.origin.includes('5173') ? 'http://127.0.0.1:8000' : window.location.origin;
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState('terminal'); // 'terminal' or 'settings'
+  const [activeTab, setActiveTab] = useState('terminal'); // 'terminal', 'sniper', or 'settings'
   const [activeSymbol, setActiveSymbol] = useState('BTC/USDT');
   const [selectedTimeframe, setSelectedTimeframe] = useState('4h');
   
@@ -249,6 +250,13 @@ export default function App() {
             <span>交易诊断终端</span>
           </button>
           <button 
+            className={`btn btn-secondary ${activeTab === 'sniper' ? 'active' : ''}`}
+            onClick={() => setActiveTab('sniper')}
+          >
+            <Target size={16} className="text-cyan-400" />
+            <span>🎯 智能狙击控制台</span>
+          </button>
+          <button 
             className={`btn btn-secondary ${activeTab === 'settings' ? 'active' : ''}`}
             onClick={() => setActiveTab('settings')}
           >
@@ -263,6 +271,10 @@ export default function App() {
         {activeTab === 'settings' ? (
           <div style={{ padding: '1.5rem', height: '100%' }}>
             <SettingsPanel apiBase={API_BASE} />
+          </div>
+        ) : activeTab === 'sniper' ? (
+          <div style={{ padding: '1.5rem', height: '100%', overflowY: 'auto' }}>
+            <SniperDashboard apiBase={API_BASE} />
           </div>
         ) : (
           <div className="dashboard-grid">
