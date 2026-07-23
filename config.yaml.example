@@ -1,0 +1,30 @@
+# General Configuration
+symbol: "BTC/USDT"
+exchange: "binance"
+
+# Timeframes to fetch and process
+timeframes:
+  - "1M"
+  - "1W"
+  - "1D"
+  - "4h"
+  - "1h"
+
+# Technical parameters
+fibonacci:
+  lookback_days: 100  # Number of daily candles to scan for global High/Low
+
+# LLM Configuration
+llm:
+  model: "gpt-4o"  # Support gpt-4o, gemini-1.5-pro, deepseek-chat, etc.
+  temperature: 0.1
+  max_tokens: 3000
+
+# Notification Settings
+# Note: Sensitive API Keys and Tokens should be placed in the .env file.
+notifications:
+  enabled: true
+  channels:
+    - "telegram"   # Supported: "telegram", "serverchan", "bark"
+  telegram:
+    chat_id: ""    # Telegram Chat ID to send notifications to
