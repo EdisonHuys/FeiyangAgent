@@ -1,4 +1,5 @@
 import os
+import json
 import yaml
 import logging
 import pandas as pd
@@ -14,17 +15,19 @@ import sys
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 try:
-    from data_fetcher import DataFetcher
+    from data_fetcher import DataFetcher, get_data_fetcher
     from indicators import calculate_indicators, calculate_fibonacci_levels, clean_and_compress
-    from agent import FeiyangAgent
+    from agent import FeiyangAgent, load_system_prompt
     from notifier import Notifier
     from sniper_engine import SniperEngine
+    from backtest import BacktestRunner
 except ImportError:
-    from backend.data_fetcher import DataFetcher
+    from backend.data_fetcher import DataFetcher, get_data_fetcher
     from backend.indicators import calculate_indicators, calculate_fibonacci_levels, clean_and_compress
-    from backend.agent import FeiyangAgent
+    from backend.agent import FeiyangAgent, load_system_prompt
     from backend.notifier import Notifier
     from backend.sniper_engine import SniperEngine
+    from backend.backtest import BacktestRunner
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("FeiyangBackend")
@@ -34,7 +37,22 @@ load_dotenv()
 
 app = FastAPI(title="Feiyang Agent API")
 
+@app.middleware("http")
+async def add_html_no_cache_headers(request, call_next):
+    """
+    WKWebView heuristically caches index.html (StaticFiles sends no cache
+    headers), so after an app upgrade the webview can keep loading the OLD
+    html -> OLD js bundle -> newly added UI never appears. Force revalidation
+    for HTML documents; hashed assets (index-<hash>.js/css) stay cacheable.
+    """
+    response = await call_next(request)
+    path = request.url.path
+    if path == "/" or path.endswith(".html"):
+        response.headers["Cache-Control"] = "no-cache, must-revalidate"
+    return response
+
 import threading
+import time
 from datetime import datetime
 
 monitor_logs = []
@@ -48,10 +66,12 @@ def log_monitor_event(message: str):
         if len(monitor_logs) > 100:
             monitor_logs.pop(0)
 
-# Enable CORS for local frontend development
+# CORS: local desktop app — only allow loopback origins (served UI + Vite dev
+# server). Wildcard + credentials is both spec-invalid and unsafe here since
+# the API exposes config read/write (incl. API keys) to any local web page.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allows all origins in development
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -72,8 +92,10 @@ else:
 CONFIG_PATH = os.path.join(root_dir, "config.yaml")
 ENV_PATH = os.path.join(root_dir, ".env")
 STATE_FILE_PATH = os.path.join(root_dir, "last_signals.json")
+PROMPT_PATH = os.path.join(root_dir, "feiyang_prompt.txt")
 
 sniper_engine = SniperEngine(root_dir)
+backtest_runner = BacktestRunner(root_dir)
 
 def load_signals_state() -> dict:
     if os.path.exists(STATE_FILE_PATH):
@@ -328,29 +350,36 @@ def update_dotenv(updates: Dict[str, str]):
     # Reload environment
     os.environ.update(env_dict)
 
+CHART_INDICATOR_COLS = [
+    'MA5', 'MA10', 'MA30', 'EMA55',
+    'BB_Lower', 'BB_Middle', 'BB_Upper',
+    'RSI_14', 'KDJ_K', 'KDJ_D', 'KDJ_J',
+    'MACD_DIF', 'MACD_Hist', 'MACD_DEA'
+]
+
 def get_chart_data(df):
+    """
+    Convert an OHLCV + indicators DataFrame into chart-ready records.
+    Vectorized (bulk column ops + to_dict) instead of row-by-row iterrows.
+    Output shape is identical to the legacy implementation:
+    {"time": int, "open": float, ..., "<indicator_lower>": float (NaN omitted)}
+    """
+    base_cols = ['timestamp', 'open', 'high', 'low', 'close', 'volume']
+    present_indicators = [c for c in CHART_INDICATOR_COLS if c in df.columns]
+
+    out = df[base_cols + present_indicators].copy()
+    out['time'] = (out['timestamp'] // 1000)
+    out = out.drop(columns=['timestamp'])
+    out = out.rename(columns={c: c.lower() for c in present_indicators})
+
     chart_data = []
-    for _, row in df.iterrows():
-        record = {
-            "time": int(row['timestamp'] / 1000),  # UNIX timestamp in seconds
-            "open": float(row['open']),
-            "high": float(row['high']),
-            "low": float(row['low']),
-            "close": float(row['close']),
-            "volume": float(row['volume']),
-        }
-        # Add technical indicators if they are not NaN
-        cols = [
-            'MA5', 'MA10', 'MA30', 'EMA55',
-            'BB_Lower', 'BB_Middle', 'BB_Upper',
-            'RSI_14', 'KDJ_K', 'KDJ_D', 'KDJ_J',
-            'MACD_DIF', 'MACD_Hist', 'MACD_DEA'
-        ]
-        for col in cols:
-            val = row.get(col)
-            if pd.notna(val):
-                record[col.lower()] = float(val)
-        chart_data.append(record)
+    for rec in out.to_dict('records'):
+        # Drop NaN values; cast to native Python types for safe JSON encoding
+        chart_data.append({
+            k: (int(v) if k == 'time' else float(v))
+            for k, v in rec.items()
+            if pd.notna(v)
+        })
     return chart_data
 
 @app.get("/api/config")
@@ -440,17 +469,47 @@ def clear_monitor_logs():
         log_monitor_event("运行日志已清空。正在持续监控中...")
     return {"status": "success"}
 
+# Short-TTL cache for /api/market responses. The frontend polls this endpoint
+# every 60s; without a cache each poll re-downloads 5 timeframes x 200 candles
+# from the exchange. 30s is well within candle freshness tolerance for
+# visualization while cutting exchange traffic roughly in half.
+MARKET_CACHE_TTL_SECONDS = 30
+_market_cache = {}
+_market_cache_lock = threading.Lock()
+
+def _market_cache_get(key):
+    with _market_cache_lock:
+        entry = _market_cache.get(key)
+        if entry and (time.time() - entry[0]) < MARKET_CACHE_TTL_SECONDS:
+            return entry[1]
+    return None
+
+def _market_cache_set(key, data):
+    with _market_cache_lock:
+        # Keep the cache bounded: drop stale entries on insert
+        now = time.time()
+        stale_keys = [k for k, (ts, _) in _market_cache.items() if now - ts >= MARKET_CACHE_TTL_SECONDS]
+        for k in stale_keys:
+            _market_cache.pop(k, None)
+        _market_cache[key] = (now, data)
+
 @app.get("/api/market")
-def get_market_data(symbol: str = "BTC/USDT"):
+def get_market_data(symbol: str = "BTC/USDT", force_refresh: bool = False):
     """
     Fetch market OHLCV data and calculate all indicators for visualization.
+    Responses are cached for MARKET_CACHE_TTL_SECONDS unless force_refresh is set.
     """
     yaml_cfg = load_yaml_config()
+    cache_key = (yaml_cfg.get("exchange", "binance"), symbol)
+    if not force_refresh:
+        cached = _market_cache_get(cache_key)
+        if cached is not None and all(tf in cached.get("charts", {}) for tf in timeframes):
+            return cached
     exchange_id = yaml_cfg.get("exchange", "binance")
     timeframes = yaml_cfg.get("timeframes", ["1M", "1W", "1D", "4h", "1h"])
     fib_lookback = yaml_cfg.get("fibonacci", {}).get("lookback_days", 100)
-    
-    fetcher = DataFetcher(exchange_id=exchange_id)
+
+    fetcher = get_data_fetcher(exchange_id)
     raw_dfs = {}
     
     # 1. Fetch OHLCV data
@@ -490,12 +549,14 @@ def get_market_data(symbol: str = "BTC/USDT"):
         logger.error(f"Error compressing data: {e}")
         raise HTTPException(status_code=500, detail=f"Data packaging error: {str(e)}")
         
-    return {
+    result = {
         "symbol": symbol,
         "fibonacci_levels": fib_levels,
         "charts": charts_data,
         "payload": payload
     }
+    _market_cache_set(cache_key, result)
+    return result
 
 @app.post("/api/analyze")
 def run_analysis(req: AnalysisRequest):
@@ -506,8 +567,8 @@ def run_analysis(req: AnalysisRequest):
     logger.info(f"Triggering diagnostic analysis for symbol: {symbol}")
     log_monitor_event(f"⚡ [手动触发] 手动开启 {symbol} 诊断，正在拉取 K 线并计算指标...")
     
-    # 1. Fetch market data
-    market_data = get_market_data(symbol)
+    # 1. Fetch market data (bypass cache so the LLM always sees fresh data)
+    market_data = get_market_data(symbol, force_refresh=True)
     payload = market_data["payload"]
     
     # 2. Setup Agent
@@ -532,9 +593,10 @@ def run_analysis(req: AnalysisRequest):
         api_base=api_base,
         model_name=model_name,
         temperature=temperature,
-        max_tokens=max_tokens
+        max_tokens=max_tokens,
+        system_prompt=load_system_prompt(root_dir)
     )
-    
+
     # 3. Call LLM
     try:
         json_signal, markdown_report = agent.analyze(payload)
@@ -627,6 +689,12 @@ class SniperConfigRequest(BaseModel):
     live_secret: Optional[str] = None
     live_passphrase: Optional[str] = None
     live_trading_mode: Optional[str] = None
+    circuit_breaker_enabled: Optional[bool] = None
+    daily_max_loss_percent: Optional[float] = None
+    pending_ttl_hours: Optional[float] = None
+    taker_fee_rate: Optional[float] = None
+    maker_fee_rate: Optional[float] = None
+    slippage_rate: Optional[float] = None
 
 @app.get("/api/sniper/dashboard")
 def get_sniper_dashboard():
@@ -666,6 +734,16 @@ def reset_paper_trading(req: ResetPaperRequest):
     log_monitor_event(f"🗑️ [模拟盘重置成功] 已清空模拟持仓记录，重置初始模拟资金为 ${req.initial_balance} USD！")
     return res
 
+@app.post("/api/sniper/reset-breaker")
+def reset_circuit_breaker():
+    """
+    Manually release today's circuit breaker for the CURRENT mode and
+    re-baseline its day-start balance at the current balance.
+    """
+    res = sniper_engine.reset_circuit_breaker()
+    log_monitor_event(f"🔓 [熔断手动解除] 用户手动复位了日内熔断器（当前模式），盈亏基准已重置。")
+    return res
+
 class ExchangeTestRequest(BaseModel):
     exchange_id: str
     api_key: str
@@ -678,7 +756,7 @@ def test_exchange_api(req: ExchangeTestRequest):
     Test connectivity to the selected exchange API and fetch live account balance.
     """
     import ccxt
-    fetcher = DataFetcher(exchange_id=req.exchange_id)
+    fetcher = get_data_fetcher(req.exchange_id)
     try:
         ex_class = getattr(ccxt, req.exchange_id.lower())
         ex_params = {
@@ -697,13 +775,15 @@ def test_exchange_api(req: ExchangeTestRequest):
         usdt_free = balance.get("free", {}).get("USDT", 0.0)
         usdt_total = balance.get("total", {}).get("USDT", 0.0)
 
-        # Also update sniper account balance to match real live balance if connected successfully
+        # Also update sniper live balance to match real account if connected
+        # successfully (config key is live_account_balance — update_config only
+        # writes keys that already exist, "account_balance" would be dropped)
         sniper_engine.update_config({
             "live_exchange": req.exchange_id,
             "live_api_key": req.api_key,
             "live_secret": req.secret,
             "live_passphrase": req.passphrase,
-            "account_balance": round(usdt_total, 2)
+            "live_account_balance": round(usdt_total, 2)
         })
 
         return {
@@ -809,6 +889,102 @@ def test_notification(req: NotificationTestRequest):
         "message": " | ".join(results)
     }
 
+# --- Strategy Prompt Management API ---
+class PromptUpdateRequest(BaseModel):
+    prompt: str = ""   # empty string restores the built-in default
+
+@app.get("/api/prompt")
+def get_strategy_prompt():
+    """
+    Return the currently active Feiyang system prompt and whether it is a
+    user-customized override (feiyang_prompt.txt) or the built-in default.
+    """
+    custom = ""
+    if os.path.exists(PROMPT_PATH):
+        try:
+            with open(PROMPT_PATH, "r", encoding="utf-8") as f:
+                custom = f.read()
+        except Exception as e:
+            logger.warning(f"Failed to read custom prompt: {e}")
+    is_custom = bool(custom.strip())
+    return {
+        "is_custom": is_custom,
+        "prompt": custom if is_custom else FeiyangAgent.DEFAULT_SYSTEM_PROMPT,
+    }
+
+@app.post("/api/prompt")
+def save_strategy_prompt(req: PromptUpdateRequest):
+    """
+    Save a custom Feiyang system prompt. Takes effect on the next diagnosis
+    (agent is rebuilt per analysis — no restart needed). Empty prompt
+    deletes the override and restores the built-in default.
+    """
+    text = (req.prompt or "").strip()
+    try:
+        if not text:
+            if os.path.exists(PROMPT_PATH):
+                os.remove(PROMPT_PATH)
+            log_monitor_event("🧠 [策略 Prompt] 已恢复为内置默认 Prompt。")
+            return {"status": "success", "is_custom": False, "message": "已恢复为内置默认 Prompt。"}
+        if len(text) < 50:
+            raise HTTPException(status_code=400, detail="Prompt 太短（< 50 字符），不像是一个完整的策略人设，已拒绝保存。")
+        if "```json" not in text or "signal_type" not in text:
+            raise HTTPException(status_code=400, detail="Prompt 必须保留 ```json 信号块与 signal_type 字段定义，否则信号将无法解析驱动交易系统。")
+        with open(PROMPT_PATH, "w", encoding="utf-8") as f:
+            f.write(text)
+        log_monitor_event("🧠 [策略 Prompt] 自定义 Prompt 已保存，下一次诊断即刻生效。")
+        return {"status": "success", "is_custom": True, "message": "自定义 Prompt 已保存，下一次诊断即刻生效。"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to save custom prompt: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# --- Historical Backtest API Routes ---
+class BacktestStartRequest(BaseModel):
+    symbol: str
+    days: int = 14
+    step_hours: int = 4
+    max_llm_calls: int = 60
+    initial_balance: float = 10000.0
+
+@app.post("/api/backtest/start")
+def start_backtest(req: BacktestStartRequest):
+    """
+    Launch a walk-forward historical backtest in a background thread.
+    Each signal point consumes one real LLM call (budget-capped).
+    """
+    if not req.symbol or "/" not in req.symbol:
+        raise HTTPException(status_code=400, detail="交易对格式不正确，示例：BTC/USDT")
+    res = backtest_runner.start(
+        symbol=req.symbol.strip().upper(),
+        days=req.days,
+        step_hours=req.step_hours,
+        max_llm_calls=req.max_llm_calls,
+        initial_balance=req.initial_balance,
+    )
+    if res.get("status") == "success":
+        log_monitor_event(f"📈 [历史回测] 已启动 {req.symbol.upper()} 近 {req.days} 天回放（每 {req.step_hours}h 一个诊断点，LLM 预算 {req.max_llm_calls} 次）")
+    return res
+
+@app.get("/api/backtest/status")
+def get_backtest_status():
+    return backtest_runner.status()
+
+@app.get("/api/backtest/result")
+def get_backtest_result():
+    res = backtest_runner.result()
+    if res is None:
+        return {"status": "empty", "message": "暂无已完成的回测结果"}
+    return {"status": "success", "result": res}
+
+@app.post("/api/backtest/stop")
+def stop_backtest():
+    res = backtest_runner.stop()
+    if res.get("status") == "success":
+        log_monitor_event("⏹ [历史回测] 用户手动停止回测任务")
+    return res
+
 def start_background_monitor():
     import time
     from threading import Thread
@@ -827,16 +1003,11 @@ def start_background_monitor():
                 sniper_mode = sniper_cfg.get("mode", "off")
                 
                 if sniper_mode != "off" and symbols:
-                    fetcher = DataFetcher(exchange_id=exchange_id)
-                    prices_dict = {}
-                    for sym in symbols:
-                        try:
-                            df_1h = fetcher.fetch_ohlcv(sym, timeframe="1h", limit=3)
-                            if df_1h is not None and not df_1h.empty:
-                                prices_dict[sym] = float(df_1h['close'].iloc[-1])
-                        except Exception:
-                            pass
-                    
+                    fetcher = get_data_fetcher(exchange_id)
+                    # Batched lightweight ticker fetch (1 request) instead of
+                    # per-symbol kline requests on every 10s tick
+                    prices_dict = fetcher.fetch_latest_prices(symbols)
+
                     if prices_dict:
                         sniper_engine.check_market_prices(prices_dict)
             except Exception as e:
@@ -875,7 +1046,7 @@ def start_background_monitor():
                     for symbol in symbols:
                         try:
                             log_monitor_event(f"📊 [正在诊断] 币对：{symbol}... 正在拉取多周期 K 线并计算指标")
-                            fetcher = DataFetcher(exchange_id=exchange_id)
+                            fetcher = get_data_fetcher(exchange_id)
                             timeframes = yaml_cfg.get("timeframes", ["1M", "1W", "1D", "4h", "1h"])
                             raw_dfs = fetcher.fetch_all_timeframes(symbol, timeframes, limit=100)
                                 
@@ -895,7 +1066,8 @@ def start_background_monitor():
                                 api_base=api_base,
                                 model_name=model_name,
                                 temperature=temperature,
-                                max_tokens=max_tokens
+                                max_tokens=max_tokens,
+                                system_prompt=load_system_prompt(root_dir)
                             )
                             json_signal, markdown_report = agent.analyze(payload)
                             process_signal_evaluation(symbol, payload, json_signal, markdown_report, yaml_cfg, source_tag="1H定时诊断")

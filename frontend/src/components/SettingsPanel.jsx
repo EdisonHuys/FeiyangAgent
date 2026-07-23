@@ -37,7 +37,16 @@ export default function SettingsPanel({ apiBase }) {
         return res.json();
       })
       .then(data => {
-        setConfig(data);
+        try {
+          const draft = localStorage.getItem('feiyang_settings_draft');
+          if (draft) {
+            setConfig(prev => ({ ...data, ...JSON.parse(draft) }));
+          } else {
+            setConfig(data);
+          }
+        } catch (e) {
+          setConfig(data);
+        }
         setLoading(false);
       })
       .catch(err => {
@@ -45,6 +54,15 @@ export default function SettingsPanel({ apiBase }) {
         setLoading(false);
       });
   }, [apiBase]);
+
+  // Persist draft config on change
+  useEffect(() => {
+    if (!loading) {
+      try {
+        localStorage.setItem('feiyang_settings_draft', JSON.stringify(config));
+      } catch (e) {}
+    }
+  }, [config, loading]);
 
   const handleChange = (e) => {
     const { name, value, type, checked } = e.target;
@@ -85,6 +103,7 @@ export default function SettingsPanel({ apiBase }) {
       })
       .then(data => {
         setSaving(false);
+        try { localStorage.removeItem('feiyang_settings_draft'); } catch (e) {}
         setMessage({ type: 'success', text: '配置保存成功！' });
         setTimeout(() => setMessage(null), 3000);
       })
@@ -538,6 +557,7 @@ export default function SettingsPanel({ apiBase }) {
           )}
         </div>
       </div>
+
     </form>
   );
 }

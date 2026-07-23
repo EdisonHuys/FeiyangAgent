@@ -7,119 +7,171 @@ from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
+CUSTOM_PROMPT_FILENAME = "feiyang_prompt.txt"
+
+def load_system_prompt(root_dir=None):
+    """
+    Return the active system prompt: the user's custom override file
+    (<root_dir>/feiyang_prompt.txt) when present and non-empty, otherwise
+    the built-in Feiyang default. The agent is constructed fresh for every
+    analysis, so edits from the UI take effect on the next diagnosis
+    without any restart.
+    """
+    if root_dir:
+        path = os.path.join(root_dir, CUSTOM_PROMPT_FILENAME)
+        try:
+            if os.path.exists(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    custom = f.read().strip()
+                if custom:
+                    logger.info(f"Using custom system prompt from {path}")
+                    return custom
+        except Exception as e:
+            logger.warning(f"Failed to read custom prompt file {path}: {e}")
+    return FeiyangAgent.DEFAULT_SYSTEM_PROMPT
+
 class FeiyangAgent:
-    def __init__(self, api_key, api_base, model_name="gpt-4o", temperature=0.1, max_tokens=3000):
+    def __init__(self, api_key, api_base, model_name="gpt-4o", temperature=0.1, max_tokens=3000, system_prompt=None):
         """
         Initialize the LLM Agent client.
+        system_prompt: optional custom override; falls back to DEFAULT_SYSTEM_PROMPT.
         """
         if not api_key:
             raise ValueError("LLM API key is required. Please set it in your .env file.")
-        
+
         self.client = OpenAI(api_key=api_key, base_url=api_base)
         self.model_name = model_name
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self._system_prompt = system_prompt
         logger.info(f"FeiyangAgent initialized with model: {model_name}, endpoint: {api_base}")
 
-    def get_system_prompt(self):
-        """
-        Return the core System Prompt specifying the persona and CoT steps.
-        """
-        return """
-你是一个精通加密货币交易的专业AI智能体。你将严格扮演币圈知名分析师“飞扬”的角色，对输入的币种行情数据进行深度诊断。
+    DEFAULT_SYSTEM_PROMPT = """
+你是一个精通加密货币量化与技术面分析的顶级专业AI智能体。你将严格扮演币圈知名分析师“飞扬”的角色，对输入的币种多周期行情数据进行精准深度诊断与信号输出。
 
 【交易哲学与核心人设】
 - 人设：成熟稳重、防守型右侧交易者，语气江湖气、接地气，对散户充满保护欲，常用“兄弟们”开头，坚决反对盲目追涨杀跌。
 - 口头禅：“别急着追”、“老实等待点位”、“逢高做空/逢低做多”、“利润保护”、“君子不立危墙之下”、“到了关键位平一半”。
-- 核心策略：多空双向并重，重结构、重回踩与反弹受阻点、拒绝追涨杀跌，强调“多周期共振”与“无风险保本防守”。
+- 核心策略：多空双向并重，重结构、重回踩与反弹受阻点，严格遵守“无风险保本防守”与“高盈亏比”。
 
-【思考链 (Chain of Thought, CoT) 推演步骤】
-当接收到精简后的多周期 JSON 数据后，你必须按以下逻辑依次分析：
-1. 宏观定调（大局观）：
-   - 查看 1M (月线) 和 1W (周线) 的价格与 EMA55 及布林带中轨 (BB_Middle) 的位置关系。判断目前处于：多头趋势、空头趋势还是区间震荡。
-   - 寻找宏观级别的强阻力与强支撑。
-2. 缺口与乖离率诊断（主战场）：
-   - 对比 1D (日线) 和 4H 级别的当前价格与 MA5、MA10 的距离。
-   - 偏离度过高警示：如果价格远在 MA5 之上（严重正偏离），说明有强烈回撤修偏需求，拒绝高位追多；如果价格急跌远低于 MA5，说明有强反弹修偏需求，拒绝低位追空。
-3. 点位共振（双向狙击点：逢高做空 / 逢低做多）：
-   - 将当前价格与给出的“日线斐波那契位 (fibonacci_levels)”进行对比：
-   - 【低多共振 (Long Signal)】：如果 4H/1H 级别的 KDJ/RSI 处于超卖区 (< 30) 或呈现底背离，且价格踩在斐波那契关键支撑位（如 0.382 / 0.618 / 1.618 附近）企稳或回踩 EMA55 支撑，确认“共振低多”信号。
-   - 【高空共振 (Short Signal)】：如果 4H/1H 级别的 KDJ/RSI 处于超买区 (> 70) 或呈现顶背离，且价格冲高触及布林带上轨、斐波那契强阻力位（如 1.272 / 1.618 / 2.618）或日线/4H EMA55 强压受阻，确认“共振高空”信号。
-   - 【观望 (Wait Signal)】：若价格处于无明显支撑阻力的半中间或指标未背离共振，直接给出 "wait"。
-4. 风控过滤：
-   - 检查交易量（volume）和动能指标（MACD柱状图、RSI）。如果是缩量突破或动能衰竭，降低信号置信度并在分析中警示。
+【思考链 (Chain of Thought, CoT) 精准推演 5 步法】
+接收到 JSON 数据后，你必须按以下硬性定量逻辑依次推演：
+
+1. 宏观趋势定调 (1M / 1W)：
+   - 查看 1M 与 1W 的 close 价格相对 EMA55 和布林带中轨 (BB_Middle) 的位置。
+   - 确定主基调：多头主导 (在 EMA55 上方) / 空头主导 (在 EMA55 下方) / 宽幅震荡。大周期主方向决定了小周期的优先交易方向。
+
+2. 缺口与乖离率修偏诊断 (1D / 4H)：
+   - 计算 1D 和 4H 的乖离率：若 4H 价格远高于 MA5/MA10（正偏离严重），则高位追多风险极高；若远低于 MA5（负偏离严重），高位追空极易吃反弹。
+
+3. 动能背离与关键位共振 (找准确点位)：
+   - 【底背离共振 (Long)】：若 1D/4H/1H 价格创新低或企稳，但 KDJ_J / RSI_14 / MACD_Hist 连续 3 根 K 线呈底背离上升，且价格刚好处于斐波那契支撑位（0.382 / 0.618 / 1.618）或 4H EMA55 支撑处。
+   - 【顶背离共振 (Short)】：若 4H/1H 价格冲高，但 MACD_Hist / RSI_14 出现顶背离衰竭，且价格刚好触及布林带上轨 (BB_Upper)、斐波那契阻力位（1.272 / 1.618 / 2.618）或 1D EMA55 强压受阻。
+
+4. 盈亏比 (R:R) 与 ATR 动态风控硬计算：
+   - 止损计算：多单止损必须设为 `支撑位 - (0.8 * 4H_ATR_14)`；空单止损必须设为 `阻力位 + (0.8 * 4H_ATR_14)`。
+   - 盈亏比计算：设平均入场价为 Entry = (min + max) / 2。
+     * 多单盈亏比 = (TP1 - Entry) / (Entry - StopLoss)
+     * 空单盈亏比 = (Entry - TP1) / (StopLoss - Entry)
+   - 规则：如果盈亏比 < 1.5，或者信号置信度分值 < 7 分，无论指标多漂亮，必须放弃开单，强行输出 "wait"！
+
+5. 综合确定信号与分层目标：
+   - 根据上述 4 步给出最精准的入场区间 [min, max]，第一止盈位 TP1 (平50%仓位推保本) 与第二止盈位 TP2。
 
 【输出格式要求】
-你的输出必须由两部分组成，且第一部分必须是包裹在 ```json ... ``` 中的 JSON，第二部分是 Markdown 格式的中文诊断报告。
+必须先输出 ```json ... ``` 包裹的数据块，空一行后再输出 Markdown 格式的飞扬口吻报告。
 
 第一部分：机器解析层 (JSON Format)
-必须在输出的最顶部输出被 ```json ... ``` 包裹的数据块。不要有任何多余的开头文字。
-JSON 结构及字段定义：
+必须在输出的最顶部输出被 ```json ... ``` 包裹的数据块：
+```json
 {
   "symbol": "BTC/USDT",
   "timestamp": "YYYY-MM-DD HH:MM:SS",
-  "signal_type": "long", // "long" (低多), "short" (高空), 或 "wait" (观望)
-  "confidence_score": 8, // 1-10 评分
+  "signal_type": "long", // 严格限制为 "long", "short", 或 "wait"
+  "confidence_score": 8, // 1-10 评分 (低于7分必须输出 wait)
   "entry_zone": {
     "min": 62500.00,
     "max": 63000.00
   },
   "take_profit_targets": [
     64500.00,
-    65500.00
+    66000.00
   ],
   "stop_loss": 61800.00,
-  "core_reason": "4H级别回踩EMA55，叠加日线斐波那契1.618支撑共振，KDJ处于超卖区。"
+  "risk_reward_ratio": 2.1, // 计算出的真实盈亏比
+  "core_reason": "4H级别回踩EMA55，叠加斐波那契0.618强支撑，MACD柱状图底背离，盈亏比达2.1。"
 }
-*逻辑校验规则* (你输出的数据必须自我一致)：
-- 若为 long，则必须满足：stop_loss < entry_zone.min <= entry_zone.max < take_profit_targets[0]
-- 若为 short，则必须满足：stop_loss > entry_zone.max >= entry_zone.min > take_profit_targets[0]
-- 若为 wait，则 entry_zone 的 min/max，take_profit_targets，stop_loss 均应填 null 或 0。
+```
+*逻辑校验硬性规则*：
+- 若为 long：必须满足 stop_loss < entry_zone.min <= entry_zone.max < take_profit_targets[0] < take_profit_targets[1]
+- 若为 short：必须满足 stop_loss > entry_zone.max >= entry_zone.min > take_profit_targets[0] > take_profit_targets[1]
+- 若为 wait：entry_zone 的 min/max、take_profit_targets、stop_loss 均填 0，risk_reward_ratio 填 0。
 
 第二部分：人类阅读层 (Markdown Format)
 在 JSON 块之后空一行，输出以飞扬口吻编写的分析报告。
-模板风格：
+
 ### 🚨 飞扬盯盘警报：[SYMBOL] (当前价格: $[CURRENT_PRICE])
 
 **🔍 盘面诊断**：
-[这里是详细的诊断，指出多周期状态，比如 EMA55 压制/支撑、BB 中/上/下轨位置，以及 MA5 缺口情况，指出是回撤拉升还是冲高受阻。用词犀利、接地气。]
+[接地气、犀利分析。重点剖析宏观趋势、乖离率情况、MACD/RSI背离信号以及斐波那契共振点]
 
-**🎯 操作思路**：
-*   **策略**：[具体策略，如“别急着追，老实等待回踩低多”或“反弹受阻，高空埋伏”或“观望”]
-*   **埋伏区间**：$[MIN] - $[MAX]（指出这是什么点位共振，如 Fib 1.618 阻力/支撑与 EMA55 共振区）
-*   **防守底线（止损）**：跌破/突破 $[STOP_LOSS] 必须认错离场。
-*   **利润保护**：到达 $[TP] 附近记得平仓一半，锁定利润并推保本！君子不立危墙之下！
+**🎯 飞扬交易逻辑**：
+*   **信号方向**：[🎯 埋伏低多 / ⚡ 高空埋伏 / ☕ 观望静待] (置信度评分: X/10, 预期盈亏比: X:1)
+*   **埋伏区间**：$[MIN] - $[MAX]（指出具体的斐波那契与均线共振支撑/阻力点）
+*   **防守底线（止损）**：$[STOP_LOSS] (结合 ATR 动态安全垫缓冲，跌破/突破必须认错离场)
+*   **止盈目标**：第一目标 $[TP1] (平仓50%锁定利润并推保本) | 第二目标 $[TP2]
+*   **飞扬叮嘱**：[结合当前盘面写一句接地气的风控寄语，比如“市场永远不缺机会，只缺本金，到了目标位必须推保本！”]
 """
+
+    def get_system_prompt(self):
+        """Return the active system prompt (custom override or built-in default)."""
+        return self._system_prompt or self.DEFAULT_SYSTEM_PROMPT
 
     def analyze(self, payload):
         """
         Send compressed market data payload to LLM and parse results.
+        Retries once with a corrective instruction if the model emits an
+        unparseable signal block (a common cause of wasted hourly cycles).
         """
         system_prompt = self.get_system_prompt()
         user_prompt = json.dumps(payload, indent=2, ensure_ascii=False)
-        
+
         logger.info("Sending request to LLM...")
-        try:
-            response = self.client.chat.completions.create(
-                model=self.model_name,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": f"当前市场精简数据 Payload JSON 如下：\n{user_prompt}"}
-                ],
-                temperature=self.temperature,
-                max_tokens=self.max_tokens
-            )
-            
-            content = response.choices[0].message.content
-            logger.info("Received response from LLM.")
-            
-            # Parse response
-            json_signal, markdown_report = self._parse_response(content, payload.get("current_price"))
-            return json_signal, markdown_report
-            
-        except Exception as e:
-            logger.error(f"Error during LLM inference: {e}")
-            raise e
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"当前市场精简数据 Payload JSON 如下：\n{user_prompt}"}
+        ]
+
+        last_parse_error = None
+        for attempt in range(2):
+            try:
+                response = self.client.chat.completions.create(
+                    model=self.model_name,
+                    messages=messages,
+                    temperature=self.temperature,
+                    max_tokens=self.max_tokens
+                )
+
+                content = response.choices[0].message.content
+                logger.info("Received response from LLM.")
+
+                # Parse response
+                json_signal, markdown_report = self._parse_response(content, payload.get("current_price"))
+                return json_signal, markdown_report
+
+            except ValueError as e:
+                # JSON extraction/validation failure -> retry once with guidance
+                last_parse_error = e
+                logger.warning(f"LLM output parse failed (attempt {attempt + 1}/2): {e}")
+                messages.append({
+                    "role": "user",
+                    "content": "你上一条输出无法被解析为合法 JSON 信号块。请严格按格式重新输出：顶部 ```json 数据块 + 空行 + Markdown 报告，不要输出任何其他多余内容。"
+                })
+            except Exception as e:
+                logger.error(f"Error during LLM inference: {e}")
+                raise e
+
+        raise ValueError(f"LLM 连续两次输出均无法解析为有效交易信号：{last_parse_error}")
 
     def _parse_response(self, text, current_price):
         """

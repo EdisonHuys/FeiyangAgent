@@ -23,6 +23,13 @@
   - **双保险自动风控与推损保本**：达到 TP1 自动平仓 50% 锁定收益，并**自动上移防守止损线至建仓成本价**（锁定无风险持仓）；触及止损自动触发市价平仓双保险。
 - **可视化配置管理**：内置配置面板，可直接在 GUI 界面中动态配置 OpenAI / DeepSeek / Gemini API Key、自定义 Base URL、实盘 API Key / Secret 及推送渠道 Token，即时生效。
 - **多周期共振诊断**：覆盖 月线(1M)、周线(1W)、日线(1D)、4小时(4h)、1小时(1h) 多维周期，智能判断关键防守位与支撑阻力。
+- **📈 历史回测实验室 (Walk-Forward Backtester)**：用真实历史 K 线逐根回放完整生产链路（指标 → LLM 诊断 → 狙击引擎模拟成交），在不花一分钱本金的前提下验证策略期望值。回测与生产共用同一套限价成交、TP1 半仓保本、双保险止损、手续费/滑点与杠杆安全帽逻辑。支持 GUI 面板与 CLI 两种运行方式。
+- **🛡️ 机构级风控体系**：
+  - **杠杆安全帽**：按止损距离自动降级杠杆，保证止损永远先于交易所强平触发，风控预算真实有效。
+  - **日内回撤熔断**：当日实现亏损超过阈值（默认 6%，可配置）自动停止开新单并撤销全部挂单，次日复位。
+  - **挂单过期机制**：超过有效期（默认 24h）未成交的挂单自动撤销。
+  - **全成本建模**：手续费、滑点、资金费（8 小时 Funding）全部计入 PnL 与胜率统计。
+  - **实盘交易所侧保护单**：实盘成交后自动补挂 reduceOnly 止损单，App 崩溃/断网也有保护。
 - **实时盯盘与多渠道推送**：提供 24H 实时盯盘运行日志控制台；行情诊断、埋伏挂单、履约建仓、阶段止盈推损保本及风控平仓全流程自动推送至 Telegram、Server酱或 Bark。
 
 ---
@@ -37,6 +44,7 @@ FeiyangAgent/
 │   ├── indicators.py         # 技术指标与 Fibonacci 极值点位计算
 │   ├── agent.py              # LLM Prompt 构造、推理查询与交易逻辑校验
 │   ├── sniper_engine.py      # 🎯 AI 智能狙击交易引擎（模拟盘/实盘、仓位风控、推损保本）
+│   ├── backtest.py           # 📈 Walk-Forward 历史回测引擎（复用生产级狙击逻辑）
 │   ├── trades.json           # 狙击交易记录与持仓状态持久化文件
 │   └── notifier.py           # Telegram / Server酱 / Bark 消息推送
 ├── frontend/                 # 桌面客户端前端 (Vite + React)
@@ -45,6 +53,7 @@ FeiyangAgent/
 │   │   ├── components/
 │   │   │   ├── KLineChart.jsx      # TradingView 图表组件
 │   │   │   ├── SettingsPanel.jsx   # 密钥与核心参数配置面板
+│   │   │   ├── BacktestPanel.jsx   # 📈 历史回测实验室面板
 │   │   │   └── SniperDashboard.jsx # 🎯 智能狙击交易控制台面板
 │   │   ├── App.jsx             # 主界面布局、盯盘日志与诊断卡片渲染
 │   │   └── index.css           # 暗黑高质感 CSS 样式系统
@@ -112,6 +121,14 @@ python main.py --gui
 ```bash
 python main.py --dry-run
 ```
+
+#### 选项 C：CLI 历史回测（消耗真实 LLM 额度）
+
+```bash
+python main.py --backtest --symbol BTC/USDT --bt-days 14 --bt-step 4 --bt-calls 60
+```
+
+参数说明：`--bt-days` 回测天数（≤90）、`--bt-step` 每隔多少小时做一次 LLM 诊断（生产为 1h，步长越大越省额度）、`--bt-calls` LLM 调用预算上限。也可以直接在 GUI 的「📈 历史回测」标签页中图形化运行并查看权益曲线。
 
 ---
 

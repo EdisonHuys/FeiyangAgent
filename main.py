@@ -152,11 +152,48 @@ def main():
     parser.add_argument("--loop", action="store_true", help="Run the agent in a loop")
     parser.add_argument("--interval", type=int, default=3600, help="Loop interval in seconds (default: 3600)")
     parser.add_argument("--gui", action="store_true", help="Launch Graphical Dashboard UI in browser")
-    
+    parser.add_argument("--backtest", action="store_true", help="Run a walk-forward historical backtest (uses real LLM calls)")
+    parser.add_argument("--bt-days", type=int, default=14, help="Backtest window in days (default: 14, max 90)")
+    parser.add_argument("--bt-step", type=int, default=4, help="Hours between LLM signal points (default: 4)")
+    parser.add_argument("--bt-calls", type=int, default=60, help="Max LLM calls budget (default: 60)")
+    parser.add_argument("--bt-balance", type=float, default=10000.0, help="Initial paper balance (default: 10000)")
+
     args = parser.parse_args()
-    
+
     config = load_config(args.config)
-    
+
+    if args.backtest:
+        from backend.backtest import BacktestRunner
+        symbol = args.symbol or config.get("symbol", "BTC/USDT")
+        runner = BacktestRunner(os.path.dirname(os.path.abspath(__file__)))
+        res = runner.start(
+            symbol=symbol,
+            days=args.bt_days,
+            step_hours=args.bt_step,
+            max_llm_calls=args.bt_calls,
+            initial_balance=args.bt_balance,
+        )
+        if res.get("status") != "success":
+            logger.error(f"Backtest failed to start: {res.get('message')}")
+            return
+        logger.info(f"Backtest running (id {res['run_id']}). This consumes real LLM calls...")
+        while True:
+            st = runner.status()
+            print(f"\r[{st['progress_pct']}%] {st['message']}    ", end="", flush=True)
+            if not st["running"]:
+                print()
+                break
+            time.sleep(2)
+        result = runner.result()
+        if result:
+            import json as _json
+            summary = {k: v for k, v in result.items() if k not in ("trades", "equity_curve")}
+            logger.info("=== BACKTEST SUMMARY ===")
+            print(_json.dumps(summary, indent=2, ensure_ascii=False))
+        else:
+            logger.error(f"Backtest error: {runner.status().get('error')}")
+        return
+
     # Default to GUI mode if compiled/frozen (double-clicked) or if --gui is passed
     if args.gui or getattr(sys, 'frozen', False):
         import uvicorn
@@ -164,6 +201,22 @@ def main():
         from threading import Thread
 
         from backend.app import app
+
+        # 0. Port pre-flight: if 8000 is already bound (almost certainly another
+        # running FeiyangAgent instance), abort BEFORE starting anything.
+        # Otherwise the health check below would succeed against the OLD
+        # instance, this window would show its backend, and BOTH instances'
+        # monitor loops would trade in parallel (double LLM cost / double risk).
+        import socket
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(0.3)
+            port_in_use = s.connect_ex(("127.0.0.1", 8000)) == 0
+        if port_in_use:
+            logger.error(
+                "❌ 端口 8000 已被占用：检测到另一个 FeiyangAgent 实例正在运行。\n"
+                "   请先退出旧实例（检查 /Applications 或其他项目目录下的 FeiyangAgent.app），再启动本应用。"
+            )
+            sys.exit(1)
 
         # 1. Run uvicorn server in a background daemon thread
         def run_server():
@@ -175,14 +228,44 @@ def main():
         server_thread.daemon = True
         server_thread.start()
 
-        # Let the server bind and start up
-        time.sleep(0.8)
+        # Wait until the backend is actually responding before opening the
+        # window (a fixed sleep can race ahead of uvicorn on slow machines).
+        # The port was free at pre-flight, so any responder here is ours;
+        # also watch for the server thread dying on unexpected bind errors.
+        import urllib.request
+        server_ready = False
+        for _ in range(50):  # up to ~10 seconds
+            if not server_thread.is_alive():
+                logger.error("❌ 后端服务启动失败（端口绑定异常），请查看日志。")
+                sys.exit(1)
+            try:
+                with urllib.request.urlopen("http://127.0.0.1:8000/api/config", timeout=0.5) as resp:
+                    if resp.status == 200:
+                        server_ready = True
+                        break
+            except Exception:
+                time.sleep(0.2)
+        if not server_ready:
+            logger.error("❌ 后端服务在 10 秒内未就绪，放弃打开窗口。请检查日志或端口占用情况。")
+            sys.exit(1)
 
         # 2. Open native Cocoa desktop window (WKWebView wrapper)
+        # Cache-bust the URL with the bundled index.html mtime: WKWebView caches
+        # index.html heuristically, and without a fresh cache key it can keep
+        # showing the PREVIOUS build's UI after an upgrade.
+        try:
+            if getattr(sys, 'frozen', False):
+                _idx = os.path.join(sys._MEIPASS, "frontend", "dist", "index.html")
+            else:
+                _idx = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend", "dist", "index.html")
+            ui_version = int(os.path.getmtime(_idx))
+        except Exception:
+            ui_version = int(time.time())
+
         logger.info("Opening native Cocoa desktop GUI window...")
         window = webview.create_window(
             title="飞扬多周期量化交易终端",
-            url="http://127.0.0.1:8000",
+            url=f"http://127.0.0.1:8000/?v={ui_version}",
             width=1472,
             height=850,
             resizable=True

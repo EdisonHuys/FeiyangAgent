@@ -71,7 +71,13 @@ def calculate_indicators(df):
         
     # 4. RSI (14)
     df['RSI_14'] = ta.rsi(df['close'], length=14)
-    
+
+    # 4b. ATR (14) — volatility context for stop-loss placement & sizing
+    try:
+        df['ATR_14'] = ta.atr(df['high'], df['low'], df['close'], length=14)
+    except Exception:
+        df['ATR_14'] = np.nan
+
     # 5. KDJ
     df = calculate_kdj(df)
     
@@ -137,7 +143,7 @@ def clean_and_compress(data_frames, fib_levels, symbol):
             'open', 'high', 'low', 'close', 'volume',
             'MA5', 'MA10', 'MA30', 'EMA55',
             'BB_Lower', 'BB_Middle', 'BB_Upper',
-            'RSI_14', 'KDJ_K', 'KDJ_D', 'KDJ_J',
+            'RSI_14', 'ATR_14', 'KDJ_K', 'KDJ_D', 'KDJ_J',
             'MACD_DIF', 'MACD_Hist', 'MACD_DEA'
         ]
         

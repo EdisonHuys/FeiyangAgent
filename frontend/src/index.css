@@ -573,11 +573,23 @@ body {
   border-color: rgba(0, 230, 118, 0.3);
 }
 
-/* Telemetry Grid */
+/* Telemetry Grid: 3 cards per row, 2 rows total */
 .sniper-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-  gap: 1rem;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1.25rem;
+}
+
+@media (max-width: 1024px) {
+  .sniper-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (max-width: 640px) {
+  .sniper-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 .sniper-card {

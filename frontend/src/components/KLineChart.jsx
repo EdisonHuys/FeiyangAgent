@@ -143,7 +143,7 @@ export default function KLineChart({ data }) {
     bbMiddleSeries.setData(bbMiddleData);
     bbLowerSeries.setData(bbLowerData);
 
-    // Zoom to show the last 50 candles (readable width as in Image 2)
+    // Zoom to show the last 50 candles (readable width)
     const visibleBarCount = Math.min(cleanData.length, 50);
     if (visibleBarCount > 0) {
       chart.timeScale().setVisibleLogicalRange({
@@ -176,32 +176,43 @@ export default function KLineChart({ data }) {
     };
   }, [data]);
 
+  const hasData = data && data.length > 0;
+
   return (
     <div style={{ position: 'relative', width: '100%', height: '400px' }}>
-      {/* Legend overlay */}
-      <div className="chart-legend">
-        <div className="legend-item">
-          <div className="legend-color-dot" style={{ backgroundColor: '#ffd54f' }}></div>
-          <span>MA5</span>
+      {!hasData ? (
+        <div className="loader-wrapper" style={{ height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)' }}>
+          <div className="spinner" style={{ marginBottom: '0.75rem' }}></div>
+          <p style={{ fontSize: '0.85rem' }}>正在获取 K 线技术指标行情数据...</p>
         </div>
-        <div className="legend-item">
-          <div className="legend-color-dot" style={{ backgroundColor: '#4fc3f7' }}></div>
-          <span>MA10</span>
-        </div>
-        <div className="legend-item">
-          <div className="legend-color-dot" style={{ backgroundColor: '#e040fb' }}></div>
-          <span>MA30</span>
-        </div>
-        <div className="legend-item">
-          <div className="legend-color-dot" style={{ backgroundColor: '#ff8a65' }}></div>
-          <span>EMA55</span>
-        </div>
-        <div className="legend-item">
-          <div className="legend-color-dot" style={{ backgroundColor: 'rgba(144, 164, 174, 0.6)' }}></div>
-          <span>BB (20, 2)</span>
-        </div>
-      </div>
-      <div ref={chartContainerRef} style={{ width: '100%', height: '100%' }} />
+      ) : (
+        <>
+          {/* Legend overlay */}
+          <div className="chart-legend">
+            <div className="legend-item">
+              <div className="legend-color-dot" style={{ backgroundColor: '#ffd54f' }}></div>
+              <span>MA5</span>
+            </div>
+            <div className="legend-item">
+              <div className="legend-color-dot" style={{ backgroundColor: '#4fc3f7' }}></div>
+              <span>MA10</span>
+            </div>
+            <div className="legend-item">
+              <div className="legend-color-dot" style={{ backgroundColor: '#e040fb' }}></div>
+              <span>MA30</span>
+            </div>
+            <div className="legend-item">
+              <div className="legend-color-dot" style={{ backgroundColor: '#ff8a65' }}></div>
+              <span>EMA55</span>
+            </div>
+            <div className="legend-item">
+              <div className="legend-color-dot" style={{ backgroundColor: 'rgba(144, 164, 174, 0.6)' }}></div>
+              <span>BB (20, 2)</span>
+            </div>
+          </div>
+          <div ref={chartContainerRef} style={{ width: '100%', height: '100%' }} />
+        </>
+      )}
     </div>
   );
 }

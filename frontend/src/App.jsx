@@ -1,13 +1,15 @@
 import React, { useState, useEffect } from 'react';
-import { AreaChart, Settings, Play, ShieldAlert, CheckCircle2, TrendingUp, HelpCircle, Target } from 'lucide-react';
+import { AreaChart, Settings, Play, ShieldAlert, CheckCircle2, TrendingUp, HelpCircle, Target, History, Brain } from 'lucide-react';
 import KLineChart from './components/KLineChart';
 import SettingsPanel from './components/SettingsPanel';
 import SniperDashboard from './components/SniperDashboard';
+import BacktestPanel from './components/BacktestPanel';
+import PromptEditorPanel from './components/PromptEditorPanel';
 
 const API_BASE = window.location.origin.includes('5173') ? 'http://127.0.0.1:8000' : window.location.origin;
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState('terminal'); // 'terminal', 'sniper', or 'settings'
+  const [activeTab, setActiveTab] = useState('terminal'); // 'terminal', 'sniper', 'backtest', or 'settings'
   const [activeSymbol, setActiveSymbol] = useState('BTC/USDT');
   const [selectedTimeframe, setSelectedTimeframe] = useState('4h');
   
@@ -138,6 +140,8 @@ export default function App() {
     if (tf === '1h') return '1h';
     if (tf === '4h') return '4h';
     if (tf === '1D') return '1D';
+    if (tf === '1W') return '1W';
+    if (tf === '1M') return '1M';
     return '4h';
   };
 
@@ -249,14 +253,28 @@ export default function App() {
             <AreaChart size={16} />
             <span>交易诊断终端</span>
           </button>
-          <button 
+          <button
             className={`btn btn-secondary ${activeTab === 'sniper' ? 'active' : ''}`}
             onClick={() => setActiveTab('sniper')}
           >
             <Target size={16} className="text-cyan-400" />
             <span>🎯 智能狙击控制台</span>
           </button>
-          <button 
+          <button
+            className={`btn btn-secondary ${activeTab === 'backtest' ? 'active' : ''}`}
+            onClick={() => setActiveTab('backtest')}
+          >
+            <History size={16} />
+            <span>📈 历史回测</span>
+          </button>
+          <button
+            className={`btn btn-secondary ${activeTab === 'prompt' ? 'active' : ''}`}
+            onClick={() => setActiveTab('prompt')}
+          >
+            <Brain size={16} className="text-amber-400" style={{ color: '#F59E0B' }} />
+            <span>🧠 策略 Prompt</span>
+          </button>
+          <button
             className={`btn btn-secondary ${activeTab === 'settings' ? 'active' : ''}`}
             onClick={() => setActiveTab('settings')}
           >
@@ -268,13 +286,21 @@ export default function App() {
 
       {/* Main Container */}
       <main style={{ flex: 1, minHeight: 0 }}>
-        {activeTab === 'settings' ? (
+        {activeTab === 'prompt' ? (
+          <div style={{ padding: '1.5rem', height: '100%', overflowY: 'auto' }}>
+            <PromptEditorPanel apiBase={API_BASE} standalone={true} />
+          </div>
+        ) : activeTab === 'settings' ? (
           <div style={{ padding: '1.5rem', height: '100%' }}>
             <SettingsPanel apiBase={API_BASE} />
           </div>
         ) : activeTab === 'sniper' ? (
           <div style={{ padding: '1.5rem', height: '100%', overflowY: 'auto' }}>
             <SniperDashboard apiBase={API_BASE} />
+          </div>
+        ) : activeTab === 'backtest' ? (
+          <div style={{ padding: '1.5rem', height: '100%', overflowY: 'auto' }}>
+            <BacktestPanel apiBase={API_BASE} symbols={symbolsList} />
           </div>
         ) : (
           <div className="dashboard-grid">
@@ -302,7 +328,7 @@ export default function App() {
                   </div>
 
                   <div className="timeframe-selector">
-                    {['1h', '4h', '1D'].map(tf => (
+                    {['1h', '4h', '1D', '1W', '1M'].map(tf => (
                       <button 
                         key={tf} 
                         className={`btn btn-secondary ${selectedTimeframe === tf ? 'active' : ''}`}
@@ -327,7 +353,7 @@ export default function App() {
                       <p>{marketError}</p>
                     </div>
                   ) : (
-                    <KLineChart data={chartData} />
+                    <KLineChart key={`${activeSymbol}_${selectedTimeframe}`} data={chartData} />
                   )}
                 </div>
 
@@ -431,10 +457,20 @@ export default function App() {
             <section className="column-right">
               {/* Diagnose Trigger Panel */}
               <div className="panel">
-                <div className="panel-header" style={{ marginBottom: '0.5rem', borderBottom: 'none', paddingBottom: 0 }}>
+                <div className="panel-header" style={{ marginBottom: '0.5rem', borderBottom: 'none', paddingBottom: 0, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <div className="panel-title">
                     <span>💡 飞扬交易决策台</span>
                   </div>
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    style={{ fontSize: '0.75rem', padding: '0.2rem 0.55rem', display: 'flex', alignItems: 'center', gap: '0.3rem' }}
+                    onClick={() => setActiveTab('prompt')}
+                    title="自定义与调校 Prompt 人设规则"
+                  >
+                    <Brain size={13} style={{ color: '#F59E0B' }} />
+                    <span>策略 Prompt</span>
+                  </button>
                 </div>
                 <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginBottom: '1rem' }}>
                   模拟大局观（多周期共振、阻力验证、拒绝追涨），提取精炼指标由 LLM 分析产生右侧防守买卖信号。
