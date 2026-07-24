@@ -283,11 +283,21 @@ cd ..
 
 ## ☕️ 赞赏与支持
 
-如果您觉得这个项目对您有帮助，欢迎请作者喝杯咖啡！您的支持是项目持续迭代的动力。
+如果您觉得这个项目对您有帮助，欢迎通过以下方式支持作者，您的支持是项目持续迭代的动力！
 
-支持 **USDT (TRC-20)** 赞赏：
+### 1. 使用邀请链接注册币安 (Binance)
+本系统的实盘与模拟盘功能依托于币安交易所接口。如果您还没有币安账号，欢迎使用作者的专属推荐链接进行注册，这不仅能给予作者支持，您还可以享受交易手续费减免优惠：
+* **币安专属注册链接**: [https://www.bsmkweb.cc/register?ref=1163050391](https://www.bsmkweb.cc/register?ref=1163050391)
+* **专属推荐码 (Referral Code)**: `1163050391`
+
+### 2. 加密货币打赏
+支持 **USDT (TRC-20)** 赞赏请作者喝杯咖啡：
 * **网络 (Network)**: Tron (TRC-20)
 * **USDT 接收地址**: `TNxkVae5FtjHS1w9VY1mMzuKmc7bzxNbu6`
+
+<p align="left">
+  <img src="assets/usdt_trc20_qrcode.jpg" width="280" alt="USDT TRC-20 收款二维码"/>
+</p>
 
 ---
 
