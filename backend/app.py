@@ -16,18 +16,24 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 try:
     from data_fetcher import DataFetcher, get_data_fetcher
-    from indicators import calculate_indicators, calculate_fibonacci_levels, clean_and_compress
+    from indicators import (calculate_indicators, calculate_fibonacci_levels, clean_and_compress,
+                            detect_market_regime, calculate_4h_fibonacci, calculate_support_resistance,
+                            compute_key_levels_context, detect_volume_spike)
     from agent import FeiyangAgent, load_system_prompt
     from notifier import Notifier
     from sniper_engine import SniperEngine
     from backtest import BacktestRunner
+    from sentiment import build_market_context, fetch_fear_greed_index, fetch_funding_rates, check_macro_event_proximity, fetch_crypto_news
 except ImportError:
     from backend.data_fetcher import DataFetcher, get_data_fetcher
-    from backend.indicators import calculate_indicators, calculate_fibonacci_levels, clean_and_compress
+    from backend.indicators import (calculate_indicators, calculate_fibonacci_levels, clean_and_compress,
+                                    detect_market_regime, calculate_4h_fibonacci, calculate_support_resistance,
+                                    compute_key_levels_context, detect_volume_spike)
     from backend.agent import FeiyangAgent, load_system_prompt
     from backend.notifier import Notifier
     from backend.sniper_engine import SniperEngine
     from backend.backtest import BacktestRunner
+    from backend.sentiment import build_market_context, fetch_fear_greed_index, fetch_funding_rates, check_macro_event_proximity, fetch_crypto_news
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("FeiyangBackend")
@@ -287,6 +293,7 @@ class ConfigUpdate(BaseModel):
     llm_model: str
     llm_temp: float
     llm_max_tokens: int
+    consensus_enabled: Optional[bool] = True
     notify_enabled: bool
     notify_on_signal: Optional[bool] = False
     notify_on_trade: Optional[bool] = True
@@ -447,7 +454,8 @@ def save_config(cfg: ConfigUpdate):
             "llm": {
                 "model": cfg.llm_model,
                 "temperature": cfg.llm_temp,
-                "max_tokens": cfg.llm_max_tokens
+                "max_tokens": cfg.llm_max_tokens,
+                "consensus_enabled": cfg.consensus_enabled
             },
             "notifications": {
                 "enabled": cfg.notify_enabled,
@@ -521,13 +529,13 @@ def get_market_data(symbol: str = "BTC/USDT", force_refresh: bool = False):
     Responses are cached for MARKET_CACHE_TTL_SECONDS unless force_refresh is set.
     """
     yaml_cfg = load_yaml_config()
+    timeframes = yaml_cfg.get("timeframes", ["1M", "1W", "1D", "4h", "1h"])
     cache_key = (yaml_cfg.get("exchange", "binance"), symbol)
     if not force_refresh:
         cached = _market_cache_get(cache_key)
         if cached is not None and all(tf in cached.get("charts", {}) for tf in timeframes):
             return cached
     exchange_id = yaml_cfg.get("exchange", "binance")
-    timeframes = yaml_cfg.get("timeframes", ["1M", "1W", "1D", "4h", "1h"])
     fib_lookback = yaml_cfg.get("fibonacci", {}).get("lookback_days", 100)
 
     fetcher = get_data_fetcher(exchange_id)
@@ -562,13 +570,38 @@ def get_market_data(symbol: str = "BTC/USDT", force_refresh: bool = False):
     except Exception as e:
         logger.error(f"Error calculating Fib levels: {e}")
         raise HTTPException(status_code=500, detail=f"Fibonacci calculation error: {str(e)}")
+
+    # 3b. Calculate 4H Fibonacci, market regime, support/resistance, key levels
+    fib_4h = None
+    key_levels = None
+    regime_info = None
+    vol_spike = None
+    try:
+        if "4h" in processed_dfs:
+            fib_4h = calculate_4h_fibonacci(processed_dfs["4h"])
+            support_4h, resistance_4h = calculate_support_resistance(processed_dfs["4h"])
+            regime_label, regime_strength = detect_market_regime(processed_dfs["4h"])
+            regime_info = {"regime": regime_label, "strength": regime_strength}
+            current_price = float(processed_dfs["1h"]["close"].iloc[-1]) if "1h" in processed_dfs else float(processed_dfs["4h"]["close"].iloc[-1])
+            key_levels = compute_key_levels_context(current_price, fib_levels, fib_4h, support_4h, resistance_4h)
+            vol_spike = detect_volume_spike(processed_dfs["4h"])
+    except Exception as e:
+        logger.warning(f"Enriched indicators calculation warning: {e}")
         
     # 4. Generate compressed payload
     try:
-        payload = clean_and_compress(processed_dfs, fib_levels, symbol)
+        payload = clean_and_compress(processed_dfs, fib_levels, symbol, fib_4h=fib_4h, key_levels=key_levels, regime_info=regime_info, volume_spike=vol_spike)
     except Exception as e:
         logger.error(f"Error compressing data: {e}")
         raise HTTPException(status_code=500, detail=f"Data packaging error: {str(e)}")
+
+    # 4b. Inject market sentiment & news context
+    try:
+        market_ctx = build_market_context(symbols=[symbol], exchange_id=exchange_id)
+        if market_ctx:
+            payload["market_context"] = market_ctx
+    except Exception as e:
+        logger.warning(f"Sentiment context injection warning: {e}")
         
     result = {
         "symbol": symbol,
@@ -577,6 +610,64 @@ def get_market_data(symbol: str = "BTC/USDT", force_refresh: bool = False):
         "payload": payload
     }
     _market_cache_set(cache_key, result)
+    return result
+
+@app.get("/api/sentiment")
+def get_sentiment_data():
+    """
+    Fetch aggregated market sentiment data for frontend display.
+    Returns fear & greed index, funding rates, macro events, news, and risk assessment.
+    """
+    yaml_cfg = load_yaml_config()
+    symbols = yaml_cfg.get("symbols", ["BTC/USDT", "ETH/USDT"])
+    exchange_id = yaml_cfg.get("exchange", "binance")
+
+    result = {
+        "fear_greed": None,
+        "funding_rates": None,
+        "macro_event": None,
+        "news": None,
+        "risk_level": "normal",
+        "trading_bias": "normal"
+    }
+
+    try:
+        fng = fetch_fear_greed_index()
+        if fng:
+            result["fear_greed"] = fng
+    except Exception as e:
+        logger.warning(f"Sentiment API - fear_greed error: {e}")
+
+    try:
+        rates = fetch_funding_rates(symbols[:6], exchange_id)
+        if rates:
+            result["funding_rates"] = rates
+    except Exception as e:
+        logger.warning(f"Sentiment API - funding_rates error: {e}")
+
+    try:
+        macro = check_macro_event_proximity(hours_window=24)
+        if macro:
+            result["macro_event"] = macro
+    except Exception as e:
+        logger.warning(f"Sentiment API - macro error: {e}")
+
+    try:
+        news = fetch_crypto_news(max_items=5)
+        if news:
+            result["news"] = news
+    except Exception as e:
+        logger.warning(f"Sentiment API - news error: {e}")
+
+    # Compute overall risk level
+    try:
+        ctx = build_market_context(symbols=symbols[:4], exchange_id=exchange_id)
+        if ctx:
+            result["risk_level"] = ctx.get("risk_level", "normal")
+            result["trading_bias"] = ctx.get("trading_bias", "normal")
+    except Exception:
+        pass
+
     return result
 
 @app.post("/api/analyze")
@@ -618,9 +709,10 @@ def run_analysis(req: AnalysisRequest):
         system_prompt=load_system_prompt(root_dir)
     )
 
-    # 3. Call LLM
+    # 3. Call LLM (with dual-call consensus if enabled)
     try:
-        json_signal, markdown_report = agent.analyze(payload)
+        consensus_on = yaml_cfg.get("llm", {}).get("consensus_enabled", True)
+        json_signal, markdown_report = agent.analyze_with_consensus(payload, consensus_enabled=consensus_on)
     except Exception as e:
         logger.error(f"LLM analyze error: {e}")
         log_monitor_event(f"❌ [手动诊断失败] {symbol}。原因：{str(e)}")
@@ -816,7 +908,8 @@ def test_exchange_api(req: ExchangeTestRequest):
             "apiKey": req.api_key.strip(),
             "secret": req.secret.strip(),
             "enableRateLimit": True,
-            "timeout": 10000
+            "timeout": 10000,
+            "options": {"defaultType": "swap"}
         }
         if req.passphrase and req.passphrase.strip():
             ex_params["password"] = req.passphrase.strip()
@@ -1067,11 +1160,47 @@ def start_background_monitor():
                 logger.warning(f"[FastPriceCheck] Error in 10s loop: {e}")
             time.sleep(10)
 
+    def _compute_dynamic_scan_interval(base_mins, processed_dfs):
+        """
+        Dynamically adjust scan interval based on market conditions.
+        - High volatility (ATR spike or volume spike): scan every 5 min
+        - Normal conditions: use base interval (default 15 min)
+        - Calm/low volatility: scan every 30 min to save LLM tokens
+        """
+        try:
+            df_4h = processed_dfs.get("4h")
+            if df_4h is None or len(df_4h) < 21:
+                return base_mins
+
+            # Check ATR volatility: compare current ATR to 20-period average ATR
+            atr_series = df_4h['ATR_14'].dropna()
+            if len(atr_series) >= 21:
+                current_atr = float(atr_series.iloc[-1])
+                avg_atr = float(atr_series.iloc[-21:-1].mean())
+                atr_ratio = current_atr / avg_atr if avg_atr > 0 else 1.0
+            else:
+                atr_ratio = 1.0
+
+            # Check volume spike
+            vol_spike = detect_volume_spike(df_4h)
+            is_vol_spike = vol_spike.get("is_spike", False) if vol_spike else False
+
+            # Decision logic
+            if atr_ratio > 1.8 or is_vol_spike:
+                return 5   # High volatility: scan frequently
+            elif atr_ratio < 0.6 and not is_vol_spike:
+                return 30  # Calm market: save tokens
+            else:
+                return base_mins  # Normal
+        except Exception:
+            return base_mins
+
     # 2. Thread 2: 1-Hour LLM Deep Diagnostic Loop
     def hourly_llm_monitor_loop():
         time.sleep(10)
         logger.info("LLM Diagnostic Monitor Loop started.")
         log_monitor_event("🤖 大模型智能诊断后台盯盘服务已启动（已优化为短线15分钟敏捷调频）。")
+        last_processed_dfs = {}  # Pre-initialize for dynamic interval calculation
 
         while True:
             try:
@@ -1113,7 +1242,33 @@ def start_background_monitor():
                                 
                             daily_df = processed_dfs.get("1D")
                             fib_levels = calculate_fibonacci_levels(daily_df, lookback=fib_lookback)
-                            payload = clean_and_compress(processed_dfs, fib_levels, symbol)
+
+                            # Enriched pipeline: 4H fib, regime, S/R, key levels
+                            fib_4h = None
+                            key_levels = None
+                            regime_info = None
+                            vol_spike = None
+                            try:
+                                if "4h" in processed_dfs:
+                                    fib_4h = calculate_4h_fibonacci(processed_dfs["4h"])
+                                    support_4h, resistance_4h = calculate_support_resistance(processed_dfs["4h"])
+                                    regime_label, regime_strength = detect_market_regime(processed_dfs["4h"])
+                                    regime_info = {"regime": regime_label, "strength": regime_strength}
+                                    cp = float(processed_dfs["1h"]["close"].iloc[-1]) if "1h" in processed_dfs else float(processed_dfs["4h"]["close"].iloc[-1])
+                                    key_levels = compute_key_levels_context(cp, fib_levels, fib_4h, support_4h, resistance_4h)
+                                    vol_spike = detect_volume_spike(processed_dfs["4h"])
+                            except Exception as enrich_e:
+                                logger.warning(f"[Monitor] Enriched indicators warning for {symbol}: {enrich_e}")
+
+                            payload = clean_and_compress(processed_dfs, fib_levels, symbol, fib_4h=fib_4h, key_levels=key_levels, regime_info=regime_info, volume_spike=vol_spike)
+
+                            # Inject market sentiment & news context
+                            try:
+                                market_ctx = build_market_context(symbols=symbols, exchange_id=exchange_id)
+                                if market_ctx:
+                                    payload["market_context"] = market_ctx
+                            except Exception as sent_e:
+                                logger.warning(f"[Monitor] Sentiment context warning: {sent_e}")
                             
                             agent = FeiyangAgent(
                                 api_key=api_key,
@@ -1123,15 +1278,24 @@ def start_background_monitor():
                                 max_tokens=max_tokens,
                                 system_prompt=load_system_prompt(root_dir)
                             )
-                            json_signal, markdown_report = agent.analyze(payload)
+                            # Dual-call consensus: only trade when LLM agrees with itself
+                            consensus_on = yaml_cfg.get("llm", {}).get("consensus_enabled", True)
+                            json_signal, markdown_report = agent.analyze_with_consensus(payload, consensus_enabled=consensus_on)
                             process_signal_evaluation(symbol, payload, json_signal, markdown_report, yaml_cfg, source_tag=f"{scan_mins}M定时诊断")
+                            # Keep last processed_dfs for dynamic interval calculation
+                            last_processed_dfs = processed_dfs
                         except Exception as inner_e:
                             logger.error(f"[{scan_mins}M LLM Monitor] Error analyzing {symbol}: {inner_e}")
                             log_monitor_event(f"❌ [诊断失败] {symbol}。原因：{str(inner_e)}")
-                    log_monitor_event(f"😴 本轮 {scan_mins} 分钟诊断完成，伏击表格已更新。后台休眠 {scan_mins} 分钟，价格监听（10秒）持续进行中...")
+
+                    # Dynamic scan interval: adjust based on market volatility
+                    dynamic_mins = _compute_dynamic_scan_interval(scan_mins, last_processed_dfs)
+                    if dynamic_mins != scan_mins:
+                        log_monitor_event(f"📈 市场波动自适应调频：扫描间隔从 {scan_mins} 分钟调整为 {dynamic_mins} 分钟")
+                    log_monitor_event(f"😴 本轮诊断完成，伏击表格已更新。后台休眠 {dynamic_mins} 分钟，价格监听（10秒）持续进行中...")
                     
-                    # Sleep for scan_mins * 60 seconds, checking every 10 seconds
-                    total_iterations = max(1, int(scan_mins * 60 / 10))
+                    # Sleep for dynamic_mins * 60 seconds, checking every 10 seconds
+                    total_iterations = max(1, int(dynamic_mins * 60 / 10))
                     for _ in range(total_iterations):
                         time.sleep(10)
                 else:

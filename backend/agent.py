@@ -9,13 +9,12 @@ logger = logging.getLogger(__name__)
 
 CUSTOM_PROMPT_FILENAME = "feiyang_prompt.txt"
 
+
 def load_system_prompt(root_dir=None):
     """
     Return the active system prompt: the user's custom override file
     (<root_dir>/feiyang_prompt.txt) when present and non-empty, otherwise
-    the built-in Feiyang default. The agent is constructed fresh for every
-    analysis, so edits from the UI take effect on the next diagnosis
-    without any restart.
+    the built-in Feiyang default.
     """
     if root_dir:
         path = os.path.join(root_dir, CUSTOM_PROMPT_FILENAME)
@@ -30,8 +29,9 @@ def load_system_prompt(root_dir=None):
             logger.warning(f"Failed to read custom prompt file {path}: {e}")
     return FeiyangAgent.DEFAULT_SYSTEM_PROMPT
 
+
 class FeiyangAgent:
-    def __init__(self, api_key, api_base, model_name="gpt-4o", temperature=0.1, max_tokens=3000, system_prompt=None):
+    def __init__(self, api_key, api_base, model_name="gpt-4o", temperature=0.1, max_tokens=4096, system_prompt=None):
         """
         Initialize the LLM Agent client.
         system_prompt: optional custom override; falls back to DEFAULT_SYSTEM_PROMPT.
@@ -46,106 +46,220 @@ class FeiyangAgent:
         self._system_prompt = system_prompt
         logger.info(f"FeiyangAgent initialized with model: {model_name}, endpoint: {api_base}")
 
-    DEFAULT_SYSTEM_PROMPT = """
-你是一个精通加密货币量化与技术面分析的顶级专业AI智能体。你将严格扮演币圈知名分析师“飞扬”的角色，对输入的币种多周期行情数据进行精准深度诊断与信号输出。
+    DEFAULT_SYSTEM_PROMPT = """你是一个精通加密货币量化与技术面分析的顶级AI交易智能体，扮演资深分析师"飞扬"的角色。你的唯一目标是：在严格风控下，输出高胜率、高盈亏比的精准交易信号。
 
-【交易哲学与核心人设】
-- 人设：成熟稳重、防守型右侧交易者，语气江湖气、接地气，对散户充满保护欲，常用“兄弟们”开头，坚决反对盲目追涨杀跌。
-- 口头禅：“别急着追”、“老实等待点位”、“逢高做空/逢低做多”、“利润保护”、“君子不立危墙之下”、“到了关键位平一半”。
-- 核心策略：低多与高空双向并重！重结构、重关键位回踩与反弹受阻点，严格遵守“无风险保本防守”与“高盈亏比”。
+═══════════════════════════════════════
+【核心交易哲学 — 防守型右侧交易】
+═══════════════════════════════════════
+- 人设：成熟稳重、防守型右侧交易者。语气江湖气、接地气，常用"兄弟们"开头。
+- 铁律：宁可错过，绝不做错。没有明确共振 = 观望。
+- 核心策略：低多与高空双向并重，重结构、重关键位回踩/受阻，严格"无风险保本防守"与"高盈亏比"。
+- 口头禅："别急着追"、"老实等待点位"、"君子不立危墙之下"、"到了关键位平一半"、"利润保护第一"。
 
-【思考链 (Chain of Thought, CoT) 低多高空精准推演 5 步法】
-接收到 JSON 数据后，你必须按以下硬性定量逻辑依次推演：
+═══════════════════════════════════════
+【绝对禁止事项 — 违反任何一条必须输出 wait】
+═══════════════════════════════════════
+1. 禁止追涨杀跌：4H 收盘价远离 MA5/MA10（正偏离 > 1.5*ATR 或负偏离 > 1.5*ATR）时，绝不追单。
+2. 禁止逆势开仓：1D 级别明确上升趋势中（价格 > EMA55 且 EMA55 斜率向上），禁止做空；反之禁止做多。
+3. 禁止无共振开仓：至少需要 2 个独立技术因素共振（如 Fib + EMA、BB + RSI背离、MACD + 关键位）。
+4. 禁止低盈亏比：计算后 R:R < 2.0 的信号必须降级为 wait。
+5. 禁止在重大数据/事件前开仓：若 market_context.macro_event 显示距 FOMC/CPI/NFP 等 critical/high 事件 < 6 小时，必须输出 wait。
+6. 禁止在极端波动中开仓：4H ATR > 近20根4H K线平均ATR的 2.5 倍时，视为异常波动，输出 wait。
+7. 禁止在极端情绪中追单：若 Fear & Greed >= 90（极度贪婪）禁止追多；<= 10（极度恐惧）禁止追空。
 
-1. 宏观定调与多空双向主线 (1M / 1W / 1D)：
-   - 查看 1M 与 1W 相对 EMA55 及布林带中轨 (BB_Middle) 的位置。
-   - 【低多机会 (Low Long)】：在大周期多头回调（回踩 1D/4H EMA55 或 斐波那契 0.5/0.618 支撑）或大周期震荡超跌（1H/4H RSI < 35 / KDJ_J < 15 底背离）时，精准寻找低多埋伏点。
-   - 【高空机会 (High Short)】：在大周期空头反弹（受阻于 1D/4H EMA55 或 斐波那契 0.382/0.618 阻力）或大周期震荡超买（1H/4H RSI > 65 / KDJ_J > 85 顶背离）时，精准寻找高空埋伏点。
+═══════════════════════════════════════
+【8 步精准推演链 (Chain of Thought)】
+═══════════════════════════════════════
+接收到 JSON 数据后，严格按以下步骤推演：
 
-2. 乖离率与反转点位诊断 (1D / 4H / 1H)：
-   - 严禁在价格远离均线时追单：若 4H 价格正偏离过大（远高于 MA5/MA10），绝对不追多，只等待高空或回踩；若负偏离过大（远低于 MA5/MA10），绝对不追空，只等待低多或反弹。
+**第 0 步：宏观环境扫描 (Macro Context)**
+- 读取 payload 中的 market_context 字段（若存在），包含：
+  * fear_greed: 恐惧贪婪指数（0-100）及趋势方向
+  * funding_rates: 各币种当前资金费率（正=多头付费给空头，过热信号）
+  * macro_event: 最近的宏观事件及距离小时数
+  * news_headlines: 近期重要新闻标题
+  * risk_level: 综合风险等级（low/normal/elevated/extreme）
+  * trading_bias: 建议交易倾向（aggressive/normal/cautious/stand_aside）
+- 决策规则：
+  * trading_bias = "stand_aside" → 直接输出 wait，不做任何技术分析
+  * trading_bias = "cautious" → 置信度评分上限为 7 分（即使技术面完美也降级）
+  * Fear & Greed >= 85 且趋势 rising → 警惕过热，做空信号加分，做多信号减分
+  * Fear & Greed <= 15 且趋势 falling → 警惕恐慌，做多信号加分，做空信号减分
+  * 资金费率 > 0.05% → 多头拥挤，回调风险增大；< -0.05% → 空头拥挤，反弹风险增大
+  * 有 critical 宏观事件在 12h 内 → 置信度上限 6 分（强制 wait）
 
-3. 动能背离与关键位共振 (精准挂单点)：
-   - 【底背离共振 (Long)】：价格回踩近 14/30 天斐波那契 0.5 / 0.618 / 0.786 支撑位、4H EMA55 或布林带下轨，且 1H/4H MACD 柱状图或 RSI 出现底背离上升。
-     * 埋伏区间 [min, max] 精准锁定在：`支撑位` 附近 ±(0.25 * 4H_ATR)。
-   - 【顶背离共振 (Short)】：价格反弹触及近 14/30 天斐波那契 0.382 / 0.618 / 1.272 阻力位、4H EMA55 或布林带上轨，且 1H/4H MACD 柱状图或 RSI 出现顶背离衰竭。
-     * 埋伏区间 [min, max] 精准锁定在：`阻力位` 附近 ±(0.25 * 4H_ATR)。
+**第 1 步：市场状态判定 (Market Regime)**
+- 读取 payload 中的 market_regime 字段（若存在）。
+- 结合 1D/4H 的 ADX_14 判断：
+  * ADX > 25 + 价格 > EMA55 → 上升趋势（只做多，回调低多）
+  * ADX > 25 + 价格 < EMA55 → 下降趋势（只做空，反弹高空）
+  * ADX < 20 → 震荡区间（双向高抛低吸，但仓位减半）
+  * ADX 20-25 → 过渡期（谨慎，需要更强确认）
 
-4. 盈亏比 (R:R >= 1.5) 与 ATR 动态风控硬计算：
-   - 止损计算：多单止损设为 `支撑位 - (0.8 * 4H_ATR)`；空单止损设为 `阻力位 + (0.8 * 4H_ATR)`。
-   - 盈亏比计算：设平均入场价 Entry = (min + max) / 2。
-     * 多单盈亏比 = (TP1 - Entry) / (Entry - StopLoss)
-     * 空单盈亏比 = (Entry - TP1) / (StopLoss - Entry)
-   - 规则：如果盈亏比 >= 1.5 且存在明确共振，给予 8~9 分高评分并输出 "long" 或 "short"；若盈亏比 < 1.5 或无法确定关键支撑/阻力，输出 "wait"。
+**第 2 步：大周期方向定调 (1W / 1D)**
+- 1W 和 1D 相对 EMA55 的位置关系确定主方向。
+- 1D MACD 金叉/死叉状态确认中期动能。
+- 若 1W 和 1D 方向一致 → 高置信度方向；若矛盾 → 降低置信度或观望。
 
-5. 综合确定信号与分层目标：
-   - 根据上述推演输出最精准的入场区间 [min, max]，第一止盈位 TP1 (平50%仓位推保本) 与第二止盈位 TP2。
+**第 3 步：乖离率检查 (Anti-Chase Filter)**
+- 计算 4H 收盘价与 MA5 的偏离百分比：deviation = (close - MA5) / MA5 * 100
+- 若 deviation > 2%（或 > 1.5 * ATR_14 / close * 100）→ 正偏离过大，禁止追多
+- 若 deviation < -2%（或 < -1.5 * ATR_14 / close * 100）→ 负偏离过大，禁止追空
+- 此步骤是硬性过滤器，不通过则直接 wait。
 
-【输出格式要求】
-必须先输出 ```json ... ``` 包裹的数据块，空一行后再输出 Markdown 格式的飞扬口吻报告。
+**第 4 步：关键位共振定位 (Confluence Zone)**
+- 从 nearby_key_levels 中找到距当前价格最近的支撑/阻力位。
+- 共振要求（至少满足 2 项）：
+  * 斐波那契 0.5/0.618/0.786 回撤位
+  * 4H/1D EMA55 或 EMA21 动态支撑/阻力
+  * 布林带上轨/下轨
+  * 前期摆动高/低点（swing high/low）
+  * VWAP 支撑/阻力
+- 低多埋伏区：支撑位 ± 0.3 * 4H_ATR
+- 高空埋伏区：阻力位 ± 0.3 * 4H_ATR
 
-第一部分：机器解析层 (JSON Format)
-必须在输出的最顶部输出被 ```json ... ``` 包裹的数据块：
+**第 5 步：动能确认 (Momentum Confirmation)**
+- 做多确认（至少 1 项）：
+  * 1H/4H RSI 从 < 35 区域回升（底背离）
+  * 4H MACD 柱状图由负转正或连续 2 根缩短
+  * KDJ_J < 20 后金叉向上
+  * OBV 在价格新低时未创新低（量价背离）
+- 做空确认（至少 1 项）：
+  * 1H/4H RSI 从 > 65 区域回落（顶背离）
+  * 4H MACD 柱状图由正转负或连续 2 根缩短
+  * KDJ_J > 80 后死叉向下
+  * OBV 在价格新高时未创新高（量价背离）
+- 无任何确认 → 降级为 wait。
+
+**第 6 步：盈亏比硬计算 (R:R >= 2.0)**
+- 止损计算：
+  * 多单：SL = 支撑位 - 1.0 * 4H_ATR（防针扫缓冲）
+  * 空单：SL = 阻力位 + 1.0 * 4H_ATR
+- 止盈计算：
+  * TP1 = 最近反向关键位（平 50% 推保本）
+  * TP2 = 次远关键位或 Fib 扩展位
+- 盈亏比 = |TP1 - Entry| / |Entry - SL|
+- 硬性规则：R:R < 2.0 → 必须输出 wait，无论其他条件多好。
+
+**第 7 步：综合评分与信号输出**
+- 评分标准（满分 10 分）：
+  * 大周期方向一致 +2
+  * 关键位共振 >= 2 个 +2
+  * 动能确认明确 +2
+  * R:R >= 2.5 +2
+  * 市场状态适配（顺势）+1
+  * 量价配合（OBV 确认）+1
+- 评分 < 7 → 必须输出 wait
+- 评分 7-8 → 标准信号
+- 评分 9-10 → 高置信度信号（可适当放宽入场区间）
+
+═══════════════════════════════════════
+【输出格式 — 严格遵守】
+═══════════════════════════════════════
+必须在输出最顶部输出 ```json ... ``` 包裹的数据块，空一行后输出 Markdown 报告。
+
 ```json
 {
   "symbol": "BTC/USDT",
   "timestamp": "YYYY-MM-DD HH:MM:SS",
-  "signal_type": "long", // 严格限制为 "long", "short", 或 "wait"
-  "confidence_score": 8, // 1-10 评分 (低于7分必须输出 wait)
+  "signal_type": "long",
+  "confidence_score": 8,
+  "market_regime": "trending_up",
   "entry_zone": {
     "min": 62500.00,
     "max": 63000.00
   },
-  "take_profit_targets": [
-    64500.00,
-    66000.00
-  ],
-  "stop_loss": 61800.00,
-  "risk_reward_ratio": 2.1, // 计算出的真实盈亏比
-  "core_reason": "4H级别回踩EMA55，叠加斐波那契0.618强支撑，MACD柱状图底背离，盈亏比达2.1。"
+  "entry_type": "limit",
+  "take_profit_targets": [64500.00, 66000.00],
+  "stop_loss": 61500.00,
+  "risk_reward_ratio": 2.3,
+  "confluence_factors": ["Fib_0.618_support", "4H_EMA55", "RSI_divergence"],
+  "core_reason": "4H回踩EMA55叠加Fib0.618强支撑，RSI底背离确认，R:R=2.3"
 }
 ```
-*逻辑校验硬性规则*：
-- 若为 long：必须满足 stop_loss < entry_zone.min <= entry_zone.max < take_profit_targets[0] < take_profit_targets[1]
-- 若为 short：必须满足 stop_loss > entry_zone.max >= entry_zone.min > take_profit_targets[0] > take_profit_targets[1]
-- 若为 wait：entry_zone 的 min/max、take_profit_targets、stop_loss 均填 0，risk_reward_ratio 填 0。
 
-第二部分：人类阅读层 (Markdown Format)
-在 JSON 块之后空一行，输出以飞扬口吻编写的分析报告。
+字段说明：
+- signal_type: 严格限制为 "long" / "short" / "wait"
+- confidence_score: 1-10（< 7 必须输出 wait）
+- market_regime: "trending_up" / "trending_down" / "ranging" / "volatile"
+- entry_type: "limit"（挂单等待回踩）/ "market"（价格已在区间内可即时成交）
+- entry_zone: 入场价格区间 [min, max]
+- take_profit_targets: [TP1, TP2]，TP1 平 50% 推保本，TP2 全平
+- stop_loss: 防守底线
+- risk_reward_ratio: 基于 TP1 计算的真实盈亏比
+- confluence_factors: 共振因素列表（字符串数组）
+- core_reason: 一句话核心逻辑
 
-### 🚨 飞扬盯盘警报：[SYMBOL] (当前价格: $[CURRENT_PRICE])
+逻辑校验硬性规则：
+- long: stop_loss < entry_zone.min <= entry_zone.max < TP1 < TP2
+- short: stop_loss > entry_zone.max >= entry_zone.min > TP1 > TP2
+- wait: 所有价格字段填 0，risk_reward_ratio 填 0
 
-**🔍 盘面诊断**：
-[接地气、犀利分析。重点剖析宏观趋势、乖离率情况、MACD/RSI背离信号以及斐波那契共振点]
+═══════════════════════════════════════
+【Markdown 报告格式】
+═══════════════════════════════════════
+在 JSON 块后空一行，输出飞扬口吻报告：
 
-**🎯 飞扬交易逻辑**：
-*   **信号方向**：[🎯 埋伏低多 / ⚡ 高空埋伏 / ☕ 观望静待] (置信度评分: X/10, 预期盈亏比: X:1)
-*   **埋伏区间**：$[MIN] - $[MAX]（指出具体的斐波那契与均线共振支撑/阻力点）
-*   **防守底线（止损）**：$[STOP_LOSS] (结合 ATR 动态安全垫缓冲，跌破/突破必须认错离场)
-*   **止盈目标**：第一目标 $[TP1] (平仓50%锁定利润并推保本) | 第二目标 $[TP2]
-*   **飞扬叮嘱**：[结合当前盘面写一句接地气的风控寄语，比如“市场永远不缺机会，只缺本金，到了目标位必须推保本！”]
+### 飞扬盯盘警报：[SYMBOL] (当前价格: $[PRICE])
+
+**盘面诊断**：
+[犀利分析：市场状态、大周期方向、乖离率、关键位共振、动能信号]
+
+**交易逻辑**：
+- 信号方向：[埋伏低多 / 高空埋伏 / 观望静待] (评分: X/10, R:R: X:1)
+- 埋伏区间：$[MIN] - $[MAX]（共振依据）
+- 防守底线：$[SL] (ATR 缓冲 X 点)
+- 止盈目标：TP1 $[TP1] (平50%推保本) | TP2 $[TP2]
+- 飞扬叮嘱：[一句接地气的风控寄语]
 """
 
+    # Model-specific prompt suffixes for better compatibility
+    MODEL_SUFFIXES = {
+        "glm": "\n\n【重要提示】请严格按照上述 JSON 格式输出，不要添加任何额外解释。JSON 中不要使用注释。先输出完整的 JSON 块，再输出 Markdown 报告。",
+        "deepseek": "\n\n【格式强调】你的输出必须以 ```json 开头的代码块作为第一行。不要在 JSON 块之前输出任何文字。确保 JSON 可被直接解析，不含注释或尾逗号。",
+        "default": ""
+    }
+
+    def _get_model_suffix(self):
+        """Get model-specific formatting instructions."""
+        model_lower = self.model_name.lower()
+        if "glm" in model_lower:
+            return self.MODEL_SUFFIXES["glm"]
+        elif "deepseek" in model_lower:
+            return self.MODEL_SUFFIXES["deepseek"]
+        return self.MODEL_SUFFIXES["default"]
+
     def get_system_prompt(self):
-        """Return the active system prompt (custom override or built-in default)."""
-        return self._system_prompt or self.DEFAULT_SYSTEM_PROMPT
+        """Return the active system prompt with model-specific suffix."""
+        base = self._system_prompt or self.DEFAULT_SYSTEM_PROMPT
+        return base + self._get_model_suffix()
 
     def analyze(self, payload):
         """
         Send compressed market data payload to LLM and parse results.
         Retries once with a corrective instruction if the model emits an
-        unparseable signal block (a common cause of wasted hourly cycles).
+        unparseable signal block.
         """
         system_prompt = self.get_system_prompt()
         user_prompt = json.dumps(payload, indent=2, ensure_ascii=False)
 
-        logger.info("Sending request to LLM...")
+        # Build a structured user message that guides the model's attention
+        user_message = (
+            f"请对以下 {payload.get('symbol', 'UNKNOWN')} 的多周期市场数据进行完整诊断分析。\n"
+            f"当前价格: ${payload.get('current_price', 'N/A')}\n"
+            f"市场状态: {payload.get('market_regime', {}).get('regime', 'N/A') if isinstance(payload.get('market_regime'), dict) else 'N/A'}\n\n"
+            f"完整数据 Payload:\n{user_prompt}\n\n"
+            f"请严格按照 7 步推演链分析，输出 JSON 信号块 + Markdown 报告。"
+        )
+
+        logger.info(f"Sending request to LLM ({self.model_name})...")
         messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"当前市场精简数据 Payload JSON 如下：\n{user_prompt}"}
+            {"role": "user", "content": user_message}
         ]
 
         last_parse_error = None
+        content = ""  # Pre-initialize to avoid fragile dir() check in retry
         for attempt in range(2):
             try:
                 response = self.client.chat.completions.create(
@@ -158,17 +272,26 @@ class FeiyangAgent:
                 content = response.choices[0].message.content
                 logger.info("Received response from LLM.")
 
-                # Parse response
                 json_signal, markdown_report = self._parse_response(content, payload.get("current_price"))
                 return json_signal, markdown_report
 
             except ValueError as e:
-                # JSON extraction/validation failure -> retry once with guidance
                 last_parse_error = e
                 logger.warning(f"LLM output parse failed (attempt {attempt + 1}/2): {e}")
                 messages.append({
+                    "role": "assistant",
+                    "content": content
+                })
+                messages.append({
                     "role": "user",
-                    "content": "你上一条输出无法被解析为合法 JSON 信号块。请严格按格式重新输出：顶部 ```json 数据块 + 空行 + Markdown 报告，不要输出任何其他多余内容。"
+                    "content": (
+                        "你上一条输出无法被解析。请严格按以下格式重新输出：\n"
+                        "1. 第一行必须是 ```json\n"
+                        "2. 然后是完整的 JSON 对象（不含注释、不含尾逗号）\n"
+                        "3. 然后是 ```\n"
+                        "4. 空一行后是 Markdown 报告\n"
+                        "不要输出任何其他多余内容。"
+                    )
                 })
             except Exception as e:
                 logger.error(f"Error during LLM inference: {e}")
@@ -177,18 +300,19 @@ class FeiyangAgent:
         raise ValueError(f"LLM 连续两次输出均无法解析为有效交易信号：{last_parse_error}")
 
     def _parse_response(self, text, current_price):
-        """
-        Extract JSON block and Markdown text. Perform logical checks.
-        """
+        """Extract JSON block and Markdown text. Perform logical checks."""
         clean_text = text.strip()
         json_signal = None
         markdown_part = ""
 
-        # Helper to clean single line JS comments: // ...
         def sanitize_json_str(s):
-            return re.sub(r"//.*?\n", "\n", s)
+            # Remove single-line JS comments
+            s = re.sub(r"//.*?\n", "\n", s)
+            # Remove trailing commas before } or ]
+            s = re.sub(r",\s*([}\]])", r"\1", s)
+            return s
 
-        # Method 1: Match ```json ... ``` or ``` ... ``` codeblock
+        # Method 1: Match ```json ... ``` codeblock
         codeblock_pattern = re.compile(r"```(?:json)?\s*\n?(.*?)\n?\s*```", re.IGNORECASE | re.DOTALL)
         match = codeblock_pattern.search(clean_text)
 
@@ -200,7 +324,7 @@ class FeiyangAgent:
             except Exception as e:
                 logger.warning(f"Codeblock JSON parse failed: {e}. Falling back to outer brace search.")
 
-        # Method 2: Outer brace search if codeblock failed or missing
+        # Method 2: Outer brace search
         if json_signal is None:
             first_brace = clean_text.find("{")
             last_brace = clean_text.rfind("}")
@@ -211,54 +335,170 @@ class FeiyangAgent:
                     markdown_part = (clean_text[:first_brace] + clean_text[last_brace + 1:]).strip()
                 except Exception as e:
                     logger.error(f"Outer brace JSON parse failed: {e}")
-                    raise ValueError(f"无法解析 LLM 的 JSON 诊断数据块（{e}）。原始响应开头：{clean_text[:150]}")
+                    raise ValueError(f"无法解析 LLM 的 JSON 诊断数据块（{e}）。原始响应开头：{clean_text[:200]}")
             else:
-                raise ValueError(f"LLM 响应中未查找到被 ```json``` 或 {{...}} 包裹的数据块。")
+                raise ValueError(f"LLM 响应中未查找到 JSON 数据块。响应开头：{clean_text[:200]}")
+
+        # Normalize signal fields
+        json_signal = self._normalize_signal(json_signal)
 
         # Perform logical checks
         self._validate_signal(json_signal, current_price)
-        
+
         return json_signal, markdown_part
 
+    def _normalize_signal(self, signal):
+        """Normalize and fill default values for new fields."""
+        # Ensure required fields exist
+        signal.setdefault("market_regime", "unknown")
+        signal.setdefault("entry_type", "limit")
+        signal.setdefault("confluence_factors", [])
+
+        # Normalize signal_type (guard against null from LLM)
+        sig = str(signal.get("signal_type") or "").lower().strip()
+        if sig not in ("long", "short", "wait"):
+            signal["signal_type"] = "wait"
+        else:
+            signal["signal_type"] = sig  # Write back normalized lowercase
+
+        # Ensure confidence_score is int
+        try:
+            signal["confidence_score"] = int(signal.get("confidence_score", 0))
+        except (ValueError, TypeError):
+            signal["confidence_score"] = 0
+
+        # Force wait if confidence < 7
+        if signal["confidence_score"] < 7 and signal["signal_type"] != "wait":
+            logger.info(f"Confidence {signal['confidence_score']} < 7, forcing wait.")
+            signal["signal_type"] = "wait"
+
+        return signal
+
     def _validate_signal(self, signal, current_price):
-        """
-        Validate the logic bounds of the JSON signal for both Long and Short.
-        """
+        """Validate the logic bounds of the JSON signal."""
         signal_type = signal.get("signal_type")
         symbol = signal.get("symbol")
-        
+
         if signal_type == "long":
             entry_zone = signal.get("entry_zone", {}) or {}
             entry_min = entry_zone.get("min")
             entry_max = entry_zone.get("max")
             tp_targets = signal.get("take_profit_targets", []) or []
             sl = signal.get("stop_loss")
-            
+
             if None in [entry_min, entry_max, sl] or not tp_targets:
-                logger.warning(f"[{symbol}] Long signal has null trade boundaries: entry={entry_zone}, tp={tp_targets}, sl={sl}")
+                logger.warning(f"[{symbol}] Long signal has null trade boundaries.")
                 return
-                
+
             is_valid = (sl < entry_min) and (entry_min <= entry_max) and (tp_targets[0] > entry_max)
             if not is_valid:
                 logger.warning(
-                    f"[{symbol}] Long trade boundaries violation: "
+                    f"[{symbol}] Long boundaries violation: "
                     f"SL({sl}) < EntryMin({entry_min}) <= EntryMax({entry_max}) < TP({tp_targets[0]})"
                 )
-                
+
         elif signal_type == "short":
             entry_zone = signal.get("entry_zone", {}) or {}
             entry_min = entry_zone.get("min")
             entry_max = entry_zone.get("max")
             tp_targets = signal.get("take_profit_targets", []) or []
             sl = signal.get("stop_loss")
-            
+
             if None in [entry_min, entry_max, sl] or not tp_targets:
-                logger.warning(f"[{symbol}] Short signal has null trade boundaries: entry={entry_zone}, tp={tp_targets}, sl={sl}")
+                logger.warning(f"[{symbol}] Short signal has null trade boundaries.")
                 return
-                
+
             is_valid = (sl > entry_max) and (entry_max >= entry_min) and (tp_targets[0] < entry_min)
             if not is_valid:
                 logger.warning(
-                    f"[{symbol}] Short trade boundaries violation: "
+                    f"[{symbol}] Short boundaries violation: "
                     f"SL({sl}) > EntryMax({entry_max}) >= EntryMin({entry_min}) > TP({tp_targets[0]})"
                 )
+
+    def analyze_with_consensus(self, payload, consensus_enabled=True):
+        """
+        Dual-call consensus mechanism for higher signal accuracy.
+        
+        Calls the LLM twice with slightly different temperatures.
+        Only returns a tradeable signal (long/short) if BOTH calls agree
+        on direction. If they disagree, returns "wait" to avoid false signals.
+        
+        This significantly reduces hallucinated signals at the cost of
+        occasionally missing valid setups (acceptable trade-off for capital preservation).
+        
+        Args:
+            payload: Market data payload dict
+            consensus_enabled: If False, falls back to single-call analyze()
+        
+        Returns:
+            (json_signal, markdown_report) tuple
+        """
+        if not consensus_enabled:
+            return self.analyze(payload)
+
+        # First call: standard temperature
+        signal_1, report_1 = self.analyze(payload)
+        sig_type_1 = signal_1.get("signal_type", "wait")
+
+        # If first call says wait, no need for second call
+        if sig_type_1 == "wait":
+            logger.info(f"[Consensus] First call = wait, skipping second call.")
+            return signal_1, report_1
+
+        # Second call: slightly higher temperature for diversity
+        original_temp = self.temperature
+        self.temperature = min(0.3, original_temp + 0.1)
+        try:
+            signal_2, report_2 = self.analyze(payload)
+        finally:
+            self.temperature = original_temp
+
+        sig_type_2 = signal_2.get("signal_type", "wait")
+
+        # Consensus check: both must agree on direction
+        if sig_type_1 == sig_type_2:
+            # Agreement! Use the signal with higher confidence
+            if signal_2.get("confidence_score", 0) > signal_1.get("confidence_score", 0):
+                final_signal = signal_2
+                final_report = report_2
+            else:
+                final_signal = signal_1
+                final_report = report_1
+
+            # Average the confidence scores for a more conservative estimate
+            avg_conf = (signal_1.get("confidence_score", 0) + signal_2.get("confidence_score", 0)) // 2
+            final_signal["confidence_score"] = avg_conf
+            final_signal["consensus"] = True
+            logger.info(
+                f"[Consensus] AGREEMENT: both calls = {sig_type_1} "
+                f"(conf {signal_1.get('confidence_score')}/{signal_2.get('confidence_score')} → avg {avg_conf})"
+            )
+            return final_signal, final_report
+        else:
+            # Disagreement → force wait (capital preservation > FOMO)
+            logger.info(
+                f"[Consensus] DISAGREEMENT: call1={sig_type_1} vs call2={sig_type_2} → forcing wait. "
+                f"Ambiguous market conditions, better to miss than lose."
+            )
+            wait_signal = {
+                "symbol": payload.get("symbol", "UNKNOWN"),
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "signal_type": "wait",
+                "confidence_score": 0,
+                "market_regime": signal_1.get("market_regime", "unknown"),
+                "entry_zone": {"min": 0, "max": 0},
+                "entry_type": "limit",
+                "take_profit_targets": [0, 0],
+                "stop_loss": 0,
+                "risk_reward_ratio": 0,
+                "confluence_factors": [],
+                "consensus": False,
+                "core_reason": f"双次诊断方向不一致（{sig_type_1} vs {sig_type_2}），市场信号模糊，观望等待更明确共振。"
+            }
+            combined_report = (
+                f"### 飞扬盯盘警报：{payload.get('symbol', 'UNKNOWN')} — 双次诊断不一致，观望\n\n"
+                f"**诊断结果**：第一次诊断给出 {sig_type_1.upper()} 信号，第二次诊断给出 {sig_type_2.upper()} 信号。\n"
+                f"方向不一致说明当前市场信号模糊，兄弟们别急，等市场给出更明确的方向再动手。\n\n"
+                f"---\n*以下为第一次诊断参考：*\n\n{report_1}"
+            )
+            return wait_signal, combined_report

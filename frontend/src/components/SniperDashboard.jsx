@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Target, TrendingUp, ShieldAlert, Award, Activity, Settings, RefreshCw, Layers, CheckCircle2, AlertCircle, Key, Lock, Server, RotateCcw } from 'lucide-react';
+import SentimentPanel from './SentimentPanel';
 
 export default function SniperDashboard({ apiBase }) {
   const [dashboardData, setDashboardData] = useState(null);
@@ -9,6 +10,7 @@ export default function SniperDashboard({ apiBase }) {
   const [showConfigModal, setShowConfigModal] = useState(false);
   const [activeSubTab, setActiveSubTab] = useState('general'); // 'general' or 'exchange'
   const [syncingPositions, setSyncingPositions] = useState(false);
+  const [historyFilter, setHistoryFilter] = useState('all'); // 'all', 'pending', 'closed_tp', 'closed_sl', 'cancelled'
 
   // Saved Config from backend
   const [formConfig, setFormConfig] = useState({
@@ -430,6 +432,9 @@ export default function SniperDashboard({ apiBase }) {
         </div>
       )}
 
+      {/* 1c. Market Sentiment Panel */}
+      <SentimentPanel apiBase={apiBase} />
+
       {/* 2. Key Telemetry Metric Cards */}
       <div className="sniper-grid">
         {/* Win Rate */}
@@ -637,10 +642,15 @@ export default function SniperDashboard({ apiBase }) {
                           </td>
 
                           <td style={{ color: 'var(--color-short)', fontWeight: '600' }}>
-                            ${t.stop_loss}
+                            ${formatPrice(t.stop_loss)}
                             {t.tp1_partial_closed && (
                               <span style={{ fontSize: '0.65rem', background: 'rgba(0,230,118,0.15)', color: 'var(--color-long)', padding: '1px 4px', borderRadius: '3px', marginLeft: '4px' }}>
                                 已锁保本位
+                              </span>
+                            )}
+                            {t.trailing_sl_level > 0 && (
+                              <span style={{ fontSize: '0.62rem', background: 'rgba(251,191,36,0.15)', color: '#FCD34D', padding: '1px 4px', borderRadius: '3px', marginLeft: '4px', display: 'block', marginTop: '2px' }}>
+                                🔒 锁利 {t.locked_pnl_percent !== undefined ? t.locked_pnl_percent : Math.round(t.trailing_sl_level * 0.5)}% (峰值 {Math.round(t.trailing_sl_level)}%)
                               </span>
                             )}
                           </td>
@@ -744,21 +754,54 @@ export default function SniperDashboard({ apiBase }) {
 
       {/* 5. Pending Orders & History Trades Table */}
       <div className="sniper-panel" style={{ padding: 0, overflow: 'hidden' }}>
-        <div style={{ padding: '1rem 1.25rem', borderBottom: '1px solid var(--border-color)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div style={{ padding: '1rem 1.25rem', borderBottom: '1px solid var(--border-color)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontWeight: '600' }}>
             <Target size={18} style={{ color: 'var(--color-wait)' }} />
             <span>📋 狙击挂单埋伏与履约历史记录</span>
           </div>
-          <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>已平仓单与埋伏中挂单统一管理</span>
+          {/* Filter Tabs */}
+          <div style={{ display: 'flex', gap: '4px', background: 'rgba(0,0,0,0.3)', padding: '3px', borderRadius: '8px' }}>
+            {[
+              { key: 'all', label: '全部' },
+              { key: 'pending', label: '⏳ 挂单中' },
+              { key: 'closed_tp', label: '🎉 已止盈' },
+              { key: 'closed_sl', label: '🛡️ 已止损' },
+              { key: 'cancelled', label: '⚪ 已撤单' },
+            ].map(tab => (
+              <button
+                key={tab.key}
+                onClick={() => setHistoryFilter(tab.key)}
+                style={{
+                  padding: '4px 10px',
+                  borderRadius: '6px',
+                  border: 'none',
+                  fontSize: '0.72rem',
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                  transition: 'all 0.2s',
+                  background: historyFilter === tab.key ? 'rgba(139, 92, 246, 0.25)' : 'transparent',
+                  color: historyFilter === tab.key ? '#A78BFA' : 'var(--text-muted)',
+                  border: historyFilter === tab.key ? '1px solid rgba(139, 92, 246, 0.4)' : '1px solid transparent',
+                }}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
         </div>
 
         {(() => {
-          const pendingAndHistoryTrades = trades.filter(t => t.status !== 'filled' && t.status !== 'tp1_hit');
+          let pendingAndHistoryTrades = trades.filter(t => t.status !== 'filled' && t.status !== 'tp1_hit');
+
+          // Apply filter
+          if (historyFilter !== 'all') {
+            pendingAndHistoryTrades = pendingAndHistoryTrades.filter(t => t.status === historyFilter);
+          }
 
           if (pendingAndHistoryTrades.length === 0) {
             return (
               <div style={{ padding: '2rem', textAlign: 'center', color: 'var(--text-muted)', fontSize: '0.82rem' }}>
-                暂无挂单中或已结平的历史数据。
+                {historyFilter === 'all' ? '暂无挂单中或已结平的历史数据。' : '该分类下暂无记录。'}
               </div>
             );
           }

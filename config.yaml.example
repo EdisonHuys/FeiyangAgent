@@ -1,8 +1,13 @@
-# General Configuration
+# ═══════════════════════════════════════════════════
+# FeiyangAgent 配置文件
+# 复制此文件为 config.yaml 并修改参数
+# ═══════════════════════════════════════════════════
+
+# 主交易品种（CLI 单次诊断用）
 symbol: "BTC/USDT"
 exchange: "binance"
 
-# Timeframes to fetch and process
+# 多周期分析时间框架
 timeframes:
   - "1M"
   - "1W"
@@ -10,21 +15,46 @@ timeframes:
   - "4h"
   - "1h"
 
-# Technical parameters
+# 24H 监控币种列表（多币种并行诊断）
+symbols:
+  - "BTC/USDT"
+  - "ETH/USDT"
+  - "ZEC/USDT"
+  - "DOGE/USDT"
+  - "HYPE/USDT"
+  - "ZAMA/USDT"
+
+# 技术指标参数
 fibonacci:
-  lookback_days: 100  # Number of daily candles to scan for global High/Low
+  lookback_days: 100  # 日线摆动高低点回看周期
 
-# LLM Configuration
+# LLM 大模型配置
+# 支持: GLM-5.2, DeepSeek-V4F, GPT-4o, Gemini 等 OpenAI 兼容接口
 llm:
-  model: "gpt-4o"  # Support gpt-4o, gemini-1.5-pro, deepseek-chat, etc.
-  temperature: 0.1
-  max_tokens: 3000
+  model: "glm-5.2"       # 推荐 GLM-5.2 或 deepseek-v4f
+  temperature: 0.1       # 低温度保证输出稳定性
+  max_tokens: 4096       # 增大 token 限制以容纳完整分析
 
-# Notification Settings
-# Note: Sensitive API Keys and Tokens should be placed in the .env file.
+# 诊断扫描间隔（分钟）
+scan_interval_minutes: 15
+
+# 通知推送设置
+# 敏感 API Key 和 Token 请放在 .env 文件中
 notifications:
   enabled: true
+  notify_on_signal: true    # 信号变化时推送
+  notify_on_trade: true     # 交易执行时推送
   channels:
-    - "telegram"   # Supported: "telegram", "serverchan", "bark"
+    - "telegram"            # 支持: telegram, serverchan, bark
   telegram:
-    chat_id: ""    # Telegram Chat ID to send notifications to
+    chat_id: ""             # Telegram Chat ID
+
+# ═══════════════════════════════════════════════════
+# Windows 打包说明:
+#   1. 安装 Python 3.9+ 和 Node.js 18+
+#   2. pip install -r requirements.txt
+#   3. pip install pywebview pyinstaller
+#   4. python build_app.py --win
+#   5. 输出: dist/FeiyangAgent/FeiyangAgent.exe
+#   注意: 需要 Microsoft Edge WebView2 Runtime (Win10/11 通常已预装)
+# ═══════════════════════════════════════════════════

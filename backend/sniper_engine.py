@@ -38,31 +38,36 @@ class SniperEngine:
                 "max_active_trades": 3,
                 "min_confidence": 7,
                 "leverage_mode": "smart",  # "smart" or "fixed"
-                "min_leverage": 35,
-                "max_leverage": 70,
-                "fixed_leverage": 50,
+                "min_leverage": 20,
+                "max_leverage": 50,
+                "fixed_leverage": 30,
                 "live_exchange": "binance",
                 "live_api_key": "",
                 "live_secret": "",
                 "live_passphrase": "",
                 "live_trading_mode": "swap",
                 # Fee & slippage model (paper-mode accounting realism).
-                # At 70x leverage, a 0.05% taker fee on notional equals 3.5% of
-                # margin per side — ignoring fees flatters backtest results badly.
                 "taker_fee_rate": 0.0005,   # market orders / stop exits
                 "maker_fee_rate": 0.0002,   # resting limit entries
                 "slippage_rate": 0.0005,    # adverse price slip on market exits
-                # Daily drawdown circuit breaker: stop opening anything new and
-                # cancel all pending orders once today's realized loss exceeds
-                # this % of the day-start balance. Auto-resets next day.
+                # Daily drawdown circuit breaker
                 "circuit_breaker_enabled": True,
-                "daily_max_loss_percent": 6.0,
+                "daily_max_loss_percent": 5.0,
                 # Pending orders older than this many hours are auto-cancelled
-                # (a stale setup is not a valid setup). 0 disables expiry.
                 "pending_ttl_hours": 24.0,
                 # Perpetual funding fee charged on notional every 8 hours
-                # (UTC 00/08/16) while a position is open. 0 disables.
-                "funding_rate_per_8h": 0.0001
+                "funding_rate_per_8h": 0.0001,
+                # Time-based stop: close positions held longer than this without TP1
+                "max_hold_hours": 72.0,
+                # Per-symbol volatility multipliers (higher = wider stops for volatile alts)
+                "symbol_volatility_mult": {
+                    "BTC/USDT": 1.0,
+                    "ETH/USDT": 1.1,
+                    "ZEC/USDT": 1.3,
+                    "DOGE/USDT": 1.4,
+                    "HYPE/USDT": 1.5,
+                    "ZAMA/USDT": 1.6
+                }
             },
             "trades": []
         }
@@ -291,6 +296,104 @@ class SniperEngine:
                 f"⚠️ *【高危提醒】*\n{ex_id.upper()} 交易所侧止损单挂设失败：{e}\n当前 {symbol} 仓位仅依赖本机运行的双保险——若 App 关闭/断网/休眠将完全无保护！\n请立即手动在交易所设置止损：${stop_loss}"
             )
             return None
+
+    def _update_trailing_stop_loss(self, t, current_pnl_pct, actual_entry, sig_type, lev, amount):
+        """
+        Peak-based 50% trailing stop (峰值盈利 50% 锁定法):
+
+        - Tracks the highest PnL% ever reached for this position (peak_pnl_pct)
+        - Stop loss always = entry price ± (peak_pnl% × 50%) / leverage
+        - Only activates once PnL reaches ACTIVATION_THRESHOLD (20%)
+        - Only triggers an SL update when the peak advances by at least MIN_PEAK_STEP (5%)
+          to avoid noise-driven API spam on high-leverage positions
+
+        Example (ZEC, 44x leverage, entry $510):
+          Peak PnL 60%  → lock in 30% → SL = $510 × (1 + 30%/44) ≈ $513.48
+          Peak PnL 100% → lock in 50% → SL = $510 × (1 + 50%/44) ≈ $515.80
+        """
+        ACTIVATION_THRESHOLD = 12.0   # minimum PnL% to activate trailing stop (lowered for faster protection)
+        MIN_PEAK_STEP       = 3.0     # min peak advance (%) before updating SL (more responsive)
+        LOCK_RATIO          = 0.55    # lock in 55% of peak gains (stronger profit protection)
+
+        # Update the stored peak PnL if we have a new high
+        old_peak = t.get("peak_pnl_pct", 0.0)
+        if current_pnl_pct > old_peak:
+            t["peak_pnl_pct"] = current_pnl_pct
+
+        peak = t.get("peak_pnl_pct", 0.0)
+
+        # Don't activate until we hit the minimum threshold
+        if peak < ACTIVATION_THRESHOLD:
+            return False
+
+        # Only update SL when the peak has advanced meaningfully since last update
+        last_peak_at_update = t.get("trailing_sl_level", 0.0)
+        if peak - last_peak_at_update < MIN_PEAK_STEP:
+            return False
+
+        # New SL locks in 50% of peak gains
+        lock_in_pct = peak * LOCK_RATIO
+        price_move_ratio = lock_in_pct / 100.0 / lev
+        if sig_type == "long":
+            new_sl = round(actual_entry * (1 + price_move_ratio), 6)
+        else:
+            new_sl = round(actual_entry * (1 - price_move_ratio), 6)
+
+        # Only move SL in the profitable direction (never worsen it)
+        current_sl = t.get("stop_loss")
+        if current_sl is not None and current_sl != "-":
+            try:
+                current_sl_f = float(current_sl)
+                if sig_type == "long" and new_sl <= current_sl_f:
+                    return False
+                if sig_type == "short" and new_sl >= current_sl_f:
+                    return False
+            except (TypeError, ValueError):
+                pass
+
+        old_sl = t.get("stop_loss", "-")
+        t["stop_loss"] = new_sl
+        t["trailing_sl_level"] = peak   # record peak at the time of this update
+        t["locked_pnl_percent"] = round(lock_in_pct, 1)
+
+        logger.info(
+            f"[TrailingStop] 🔒 {t['symbol']} 峰值追踪止损更新: "
+            f"峰值={round(peak, 1)}% → 锁定 {round(lock_in_pct, 1)}% → "
+            f"止损 ${old_sl} → ${new_sl}  (杠杆 {lev}x)"
+        )
+
+        # For live positions: cancel old protective SL and replace with new one
+        if t.get("is_live") and amount > 0:
+            try:
+                exchange, ex_id = self._init_live_ccxt()
+                symbol = t["symbol"]
+                ccxt_symbol = f"{symbol}:USDT" if ":" not in symbol else symbol
+
+                old_order_id = t.get("protective_sl_order_id")
+                if old_order_id:
+                    try:
+                        exchange.cancel_order(old_order_id, ccxt_symbol)
+                        logger.info(f"[TrailingStop] 已撤销旧止损单 #{old_order_id}")
+                    except Exception as cancel_e:
+                        logger.warning(f"[TrailingStop] 撤销旧止损单失败，继续挂新单: {cancel_e}")
+                    t["protective_sl_order_id"] = None
+
+                new_order_id = self._place_live_protective_sl(exchange, ex_id, symbol, sig_type, amount, new_sl)
+                if new_order_id:
+                    t["protective_sl_order_id"] = new_order_id
+
+            except Exception as e:
+                logger.warning(f"[TrailingStop] 更新实盘止损单失败 ({t['symbol']}): {e}")
+
+        self._send_notification(
+            f"🔒 动态追踪止损激活：{t['symbol']}",
+            f"🔒 *【动态止损上移通知】*\n"
+            f"币种：{t['symbol']} ({sig_type.upper()})\n"
+            f"历史峰值浮盈：{round(peak, 1)}%\n"
+            f"已锁定收益：{round(lock_in_pct, 1)}%（峰值 × 50%）\n"
+            f"止损已从 ${old_sl} 上移至 ${new_sl}"
+        )
+        return True
 
     def _cancel_protective_sl(self, trade):
         """Cancel the exchange-side protective stop once the position is closed locally."""
@@ -669,7 +772,12 @@ class SniperEngine:
             else:
                 suggested_lev = min_lev
 
-        risk_amount = balance * (risk_pct / 100.0)
+        # Confidence-scaled risk: higher confidence → slightly more risk allocation
+        # conf 7 → 0.8x, conf 8 → 1.0x, conf 9+ → 1.2x of base risk
+        conf_risk_mult = 0.8 + (min(confidence, 10) - 7) * 0.133  # 7→0.8, 8→0.93, 9→1.07, 10→1.2
+        conf_risk_mult = max(0.6, min(1.3, conf_risk_mult))
+        risk_amount = balance * (risk_pct / 100.0) * conf_risk_mult
+
         sl_distance_pct = abs(entry_price - stop_loss) / entry_price if entry_price > 0 else 0.02
         if sl_distance_pct <= 0.001:
             sl_distance_pct = 0.01
@@ -692,8 +800,8 @@ class SniperEngine:
         pos_value_usd = risk_amount / sl_distance_pct
         margin_usd = pos_value_usd / suggested_lev
 
-        if margin_usd > balance * 0.33:
-            margin_usd = balance * 0.33
+        if margin_usd > balance * 0.25:
+            margin_usd = balance * 0.25
             pos_value_usd = margin_usd * suggested_lev
 
         # 🎯 10U Micro-Capital Auto-Protector ($10U - $20U 小资金适配)
@@ -705,6 +813,78 @@ class SniperEngine:
                 margin_usd = round(pos_value_usd / suggested_lev, 2)
 
         return round(pos_value_usd, 2), round(margin_usd, 2), suggested_lev
+
+    # --- Adaptive Risk Engine -------------------------------------------
+    def _get_recent_win_rate(self, lookback=10):
+        """Calculate win rate from the last N closed trades."""
+        trades = self.state.get("trades", [])
+        closed = [t for t in trades if t["status"] in ("closed_tp", "closed_sl")]
+        closed.sort(key=lambda x: x.get("closed_at", ""), reverse=True)
+        recent = closed[:lookback]
+        if len(recent) < 3:
+            return None  # Not enough data to adapt
+        wins = sum(1 for t in recent if t["status"] == "closed_tp")
+        return wins / len(recent)
+
+    def _adaptive_risk_adjust(self, base_risk_pct):
+        """
+        Dynamically adjust risk per trade based on recent performance.
+        - Win rate >= 60%: allow full risk (strategy is working)
+        - Win rate 40-60%: reduce to 80% of base (mild caution)
+        - Win rate < 40%: reduce to 50% of base (strategy may be failing)
+        - Win rate < 25%: reduce to 30% of base (severe drawdown protection)
+        Also applies cooldown multiplier after consecutive SLs.
+        """
+        win_rate = self._get_recent_win_rate(lookback=10)
+        if win_rate is None:
+            adjusted = base_risk_pct
+        elif win_rate >= 0.6:
+            adjusted = base_risk_pct  # Full risk, strategy working
+        elif win_rate >= 0.4:
+            adjusted = base_risk_pct * 0.8  # Mild caution
+        elif win_rate >= 0.25:
+            adjusted = base_risk_pct * 0.5  # Significant reduction
+        else:
+            adjusted = base_risk_pct * 0.3  # Severe protection
+
+        # Apply cooldown multiplier (consecutive SL penalty)
+        cooldown_mult = self._cooldown_multiplier()
+        adjusted *= cooldown_mult
+
+        if adjusted != base_risk_pct:
+            logger.info(
+                f"[AdaptiveRisk] Win rate: {win_rate if win_rate else 'N/A'}, "
+                f"cooldown_mult: {cooldown_mult}, "
+                f"risk: {base_risk_pct}% → {round(adjusted, 2)}%"
+            )
+        return round(adjusted, 3)
+
+    def _cooldown_multiplier(self):
+        """
+        After consecutive stop-losses, temporarily reduce position size.
+        - 2 consecutive SL: 0.7x
+        - 3 consecutive SL: 0.5x
+        - 4+ consecutive SL: 0.3x
+        Resets on any TP hit.
+        """
+        trades = self.state.get("trades", [])
+        closed = [t for t in trades if t["status"] in ("closed_tp", "closed_sl")]
+        closed.sort(key=lambda x: x.get("closed_at", ""), reverse=True)
+
+        consecutive_sl = 0
+        for t in closed:
+            if t["status"] == "closed_sl":
+                consecutive_sl += 1
+            else:
+                break  # Reset on any win
+
+        if consecutive_sl >= 4:
+            return 0.3
+        elif consecutive_sl == 3:
+            return 0.5
+        elif consecutive_sl == 2:
+            return 0.7
+        return 1.0
 
     def close_position_manually(self, trade_id):
         """Thread-safe entry point."""
@@ -967,6 +1147,40 @@ class SniperEngine:
             logger.info(f"[SniperEngine] Circuit breaker active — new {symbol} signal ignored.")
             return None
 
+        # ⏰ Time-of-day liquidity filter: avoid low-liquidity hours
+        # UTC 20:00-00:00 = Asian dead zone (thin order books, wider spreads, more slippage)
+        from datetime import datetime as _dt, timezone as _tz
+        utc_hour = _dt.now(_tz.utc).hour
+        low_liquidity_hours = cfg.get("low_liquidity_hours_utc", [20, 21, 22, 23])
+        if utc_hour in low_liquidity_hours:
+            logger.info(f"[SniperEngine] Low-liquidity hour (UTC {utc_hour}:00) — {symbol} signal deferred.")
+            return None
+
+        # 📰 Market context bias check: respect sentiment-driven stand_aside
+        market_ctx = json_signal.get("market_context") or {}
+        trading_bias = market_ctx.get("trading_bias", "normal")
+        if trading_bias == "stand_aside":
+            logger.info(f"[SniperEngine] Market context bias = stand_aside — {symbol} signal blocked.")
+            return None
+
+        # 🔗 Correlation check: avoid same-direction positions on highly correlated pairs
+        CORRELATED_GROUPS = [
+            {"BTC/USDT", "ETH/USDT"},           # BTC-ETH high correlation
+            {"DOGE/USDT", "HYPE/USDT"},         # Alt-meme correlation
+        ]
+        sig_type_check = str(json_signal.get("signal_type", "wait")).lower()
+        trades = self.state.get("trades", [])
+        active_filled = [t for t in trades if t["status"] in ["filled", "tp1_hit"]]
+        for group in CORRELATED_GROUPS:
+            if symbol in group:
+                for t in active_filled:
+                    if t["symbol"] in group and t["symbol"] != symbol and t["signal_type"] == sig_type_check:
+                        logger.info(
+                            f"[SniperEngine] Correlation block: {symbol} {sig_type_check} blocked — "
+                            f"correlated {t['symbol']} already has same-direction position."
+                        )
+                        return None
+
         sig_type = str(json_signal.get("signal_type", "wait")).lower()
         conf = json_signal.get("confidence_score", 0)
         min_conf = cfg.get("min_confidence", 7)
@@ -1053,7 +1267,20 @@ class SniperEngine:
 
         entry_min = float(min(raw_min, raw_max))
         entry_max = float(max(raw_min, raw_max))
-        planned_entry = round((entry_min + entry_max) / 2.0, 2)
+        entry_mid = round((entry_min + entry_max) / 2.0, 2)
+        # 🪜 Ladder order: split position into 3 tranches across entry zone
+        # Tranche 1 (40%): at entry_min — aggressive edge catch
+        # Tranche 2 (35%): at midpoint — core position
+        # Tranche 3 (25%): at entry_max — deep pullback bonus
+        ladder = [
+            {"price": round(entry_min, 2), "ratio": 0.40, "filled": False},
+            {"price": entry_mid, "ratio": 0.35, "filled": False},
+            {"price": round(entry_max, 2), "ratio": 0.25, "filled": False},
+        ]
+        # Weighted average entry for display/sizing (assumes all 3 fill)
+        planned_entry = round(
+            ladder[0]["price"] * 0.40 + ladder[1]["price"] * 0.35 + ladder[2]["price"] * 0.25, 2
+        )
         sl = float(json_signal.get("stop_loss", 0.0))
 
         raw_tps = json_signal.get("take_profit_targets") or []
@@ -1094,6 +1321,9 @@ class SniperEngine:
         risk_pct = cfg.get("risk_per_trade_percent", 2.0)
         max_lev = cfg.get("max_leverage", 15)
 
+        # 📊 Adaptive risk: adjust risk_pct based on recent win rate
+        risk_pct = self._adaptive_risk_adjust(risk_pct)
+
         exec_entry = curr_px if instant_fill else planned_entry
         pos_val, margin, lev = self.calculate_trade_params(
             balance, risk_pct, exec_entry, sl, conf, max_lev
@@ -1109,6 +1339,8 @@ class SniperEngine:
             "entry_min": entry_min,
             "entry_max": entry_max,
             "planned_entry": planned_entry,
+            "ladder": ladder,
+            "ladder_filled_count": 3 if instant_fill else 0,
             "actual_entry": exec_entry if instant_fill else None,
             "stop_loss": sl,
             "initial_stop_loss": sl,
@@ -1130,7 +1362,7 @@ class SniperEngine:
         }
 
         if instant_fill and not new_trade.get("is_live"):
-            _, taker_fee, _ = self._fee_rates()
+            taker_fee, _, _ = self._fee_rates()
             entry_fee = self._record_fee(new_trade, pos_val, taker_fee)
             cfg["paper_account_balance"] = round(cfg.get("paper_account_balance", 10000.0) - entry_fee, 4)
             logger.info(f"[SniperEngine] ⚡ Instant Market Fill for {symbol} at ${curr_px} (Entry Zone [{entry_min}, {entry_max}]).")
@@ -1221,7 +1453,8 @@ class SniperEngine:
         # Paper mode: immediate fill only when the limit price is already
         # marketable (price at/beyond planned_entry but stop still intact).
         # Fill at planned_entry — a resting limit order never fills mid-zone.
-        if mode == "paper":
+        # Skip if instant_fill already handled the fee above.
+        if mode == "paper" and not instant_fill:
             _, maker_fee, _ = self._fee_rates()
             immediate_fill = (
                 (sig_type == "long" and sl < current_price <= planned_entry) or
@@ -1415,6 +1648,20 @@ class SniperEngine:
             t["unrealized_pnl_usd"] = round((margin * rem_ratio * float_pct) + realized_pnl, 2)
             updated = True
 
+            # 🔒 Dynamic Trailing Stop Loss: milestones at every 10% PnL
+            # At 20% PnL → lock in 10%, at 30% → lock in 20%, etc.
+            if t["status"] in ["filled", "tp1_hit"] and float_pct > 0:
+                trailing_updated = self._update_trailing_stop_loss(
+                    t=t,
+                    current_pnl_pct=float_pct * 100.0,
+                    actual_entry=actual_entry,
+                    sig_type=sig_type,
+                    lev=lev,
+                    amount=round(amount * rem_ratio, 4)
+                )
+                if trailing_updated:
+                    sl = t["stop_loss"]  # refresh local sl variable for the SL check below
+
             # 💸 Funding fee model (paper)
             if not t.get("is_live") and t["status"] in ["filled", "tp1_hit"]:
                 funding_rate = float(cfg.get("funding_rate_per_8h", 0.0001))
@@ -1436,8 +1683,51 @@ class SniperEngine:
                             updated = True
                             logger.info(f"[SniperEngine] [{symbol}] Funding fee charged: ${funding_fee}")
 
+            # ⏰ Time-based stop: close stale positions that haven't reached TP1 after 72h
+            if t["status"] == "filled" and not t.get("tp1_partial_closed"):
+                try:
+                    entered_dt = datetime.strptime(t.get("entered_at", ""), "%Y-%m-%d %H:%M:%S")
+                    hold_hours = (datetime.now() - entered_dt).total_seconds() / 3600.0
+                except Exception:
+                    hold_hours = 0.0
+                max_hold_hours = float(cfg.get("max_hold_hours", 72.0))
+                if max_hold_hours > 0 and hold_hours > max_hold_hours:
+                    # Close at current market price — position is stale
+                    close_px = current_price
+                    if sig_type == "long":
+                        stale_pnl_pct = (close_px - actual_entry) / actual_entry * lev
+                    else:
+                        stale_pnl_pct = (actual_entry - close_px) / actual_entry * lev
+                    taker_fee, _, slippage = self._fee_rates()
+                    exit_fee = self._record_fee(t, pos_val, taker_fee)
+                    stale_net = round(margin * stale_pnl_pct - exit_fee, 2)
+                    t["pnl_usd"] = round(t.get("pnl_usd", 0.0) + stale_net, 2)
+                    t["pnl_percent"] = round((t["pnl_usd"] / margin) * 100.0, 2) if margin > 0 else 0.0
+                    t["status"] = "closed_tp" if stale_net >= 0 else "closed_sl"
+                    t["closed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    t["close_reason"] = f"⏰ 持仓超过 {int(max_hold_hours)}h 未达 TP1，时间止损市价平仓 (PnL: ${stale_net})"
+                    if not t.get("is_live"):
+                        cfg["paper_account_balance"] = round(cfg.get("paper_account_balance", 0.0) + stale_net, 2)
+                    else:
+                        self._try_live_close(t, symbol, sig_type, round(amount, 4), reason=t["close_reason"], alert_tag="time_stop", current_price=close_px)
+                    updated = True
+                    logger.info(f"[SniperEngine] [{symbol}] Time-based stop: held {round(hold_hours, 1)}h > {max_hold_hours}h, closed at ${close_px}, PnL=${stale_net}")
+                    self._send_notification(
+                        f"⏰ 时间止损平仓：{symbol}",
+                        f"⏰ *【时间止损通知】*\n币种：{symbol} ({sig_type.upper()})\n持仓时长：{round(hold_hours, 1)}h（超过 {int(max_hold_hours)}h 未达 TP1）\n平仓价：${close_px}\n实现盈亏：${t['pnl_usd']} USD ({t['pnl_percent']}%)\n资金已释放，等待下一个高共振机会。"
+                    )
+                    continue
+
+            # 🛡️ Anti-needle-sweep: add 0.15% wick tolerance to SL level
+            # This prevents stop-hunt wicks from triggering SL at exact levels
+            wick_tolerance = 0.0015  # 0.15%
             if sig_type == "long":
-                if low_price <= sl:
+                effective_sl = sl * (1 - wick_tolerance)
+            else:
+                effective_sl = sl * (1 + wick_tolerance)
+
+            if sig_type == "long":
+                if low_price <= effective_sl:
                     rem_ratio = 0.5 if t.get("tp1_partial_closed") else 1.0
                     if not self._try_live_close(t, symbol, "long", round(amount * rem_ratio, 4), reason=f"双保险触发：价格 ${low_price} 触及/穿透止损线 ${sl}", alert_tag="sl", current_price=low_price):
                         updated = True
@@ -1508,7 +1798,7 @@ class SniperEngine:
                     )
 
             elif sig_type == "short":
-                if high_price >= sl:
+                if high_price >= effective_sl:
                     rem_ratio = 0.5 if t.get("tp1_partial_closed") else 1.0
                     if not self._try_live_close(t, symbol, "short", round(amount * rem_ratio, 4), reason=f"双保险触发：价格 ${high_price} 触及/穿透止损线 ${sl}", alert_tag="sl", current_price=high_price):
                         updated = True

@@ -11,8 +11,12 @@ from dotenv import load_dotenv
 if getattr(sys, 'frozen', False):
     exec_dir = os.path.dirname(sys.executable)
     if ".app/Contents/MacOS" in exec_dir:
-        # Move up 3 levels from Contents/MacOS/FeiyangAgent
+        # macOS: Move up 3 levels from Contents/MacOS/FeiyangAgent
         root_dir = os.path.dirname(os.path.dirname(os.path.dirname(exec_dir)))
+    elif sys.platform == "win32":
+        # Windows: exe is in dist/FeiyangAgent/, root is the exe directory itself
+        # (PyInstaller --onedir puts everything alongside the exe)
+        root_dir = exec_dir
     else:
         root_dir = exec_dir
     os.chdir(root_dir)
@@ -214,7 +218,9 @@ def main():
         if port_in_use:
             logger.error(
                 "❌ 端口 8000 已被占用：检测到另一个 FeiyangAgent 实例正在运行。\n"
-                "   请先退出旧实例（检查 /Applications 或其他项目目录下的 FeiyangAgent.app），再启动本应用。"
+                "   请先退出旧实例再启动本应用。\n"
+                "   macOS: 检查 /Applications 或其他目录下的 FeiyangAgent.app\n"
+                "   Windows: 检查任务管理器中的 FeiyangAgent.exe 进程"
             )
             sys.exit(1)
 
@@ -262,7 +268,7 @@ def main():
         except Exception:
             ui_version = int(time.time())
 
-        logger.info("Opening native Cocoa desktop GUI window...")
+        logger.info(f"Opening native desktop GUI window ({sys.platform})...")
         window = webview.create_window(
             title="飞扬多周期量化交易终端",
             url=f"http://127.0.0.1:8000/?v={ui_version}",
@@ -272,7 +278,10 @@ def main():
         )
 
         # Start native desktop event loop (blocking call)
-        webview.start()
+        # Windows: use EdgeChromium (WebView2) for best compatibility
+        # macOS: use default Cocoa/WKWebView
+        gui_backend = "edgechromium" if sys.platform == "win32" else None
+        webview.start(gui=gui_backend)
         
     elif args.loop:
         logger.info(f"Starting continuous mode. Interval: {args.interval}s")
