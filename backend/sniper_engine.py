@@ -227,6 +227,27 @@ class SniperEngine:
             t["status"] = "cancelled"
             t["close_reason"] = reason or "系统批量撤销挂单"
 
+    def sync_watchlist_symbols(self, active_symbols):
+        """Cancel pending orders for symbols removed from the watchlist."""
+        with self._lock:
+            trades = self.state.get("trades", [])
+            updated = False
+            for t in trades:
+                if t.get("status") == "pending" and t.get("symbol") not in active_symbols:
+                    if t.get("is_live") and t.get("live_order_id"):
+                        try:
+                            exchange, ex_id = self._init_live_ccxt()
+                            ccxt_symbol = f"{t['symbol']}:USDT" if ":" not in t['symbol'] else t['symbol']
+                            exchange.cancel_order(t["live_order_id"], ccxt_symbol)
+                        except Exception as cancel_e:
+                            logger.warning(f"[LiveSniper] Cancel order for removed symbol {t['symbol']} failed: {cancel_e}")
+                    t["status"] = "cancelled"
+                    t["close_reason"] = f"🗑️ 币种 {t['symbol']} 已从自选监控列表中删除，未成交挂单自动撤销作废"
+                    updated = True
+                    logger.info(f"[SniperEngine] Cancelled pending trade for removed symbol {t['symbol']}.")
+            if updated:
+                self._save_state()
+
     # --- Exchange-side protective stop (live mode safety net) -----------
     def _place_live_protective_sl(self, exchange, ex_id, symbol, sig_type, amount, stop_loss):
         """
@@ -315,6 +336,11 @@ class SniperEngine:
             from notifier import Notifier
             from app import load_yaml_config
             yaml_cfg = load_yaml_config()
+            notify_cfg = yaml_cfg.get("notifications", {})
+            if not notify_cfg.get("enabled", False):
+                return
+            if not notify_cfg.get("notify_on_trade", True):
+                return
             notifier = Notifier(yaml_cfg)
             notifier.send_notification(title, content)
         except Exception as e:
@@ -598,6 +624,15 @@ class SniperEngine:
         cfg["paper_account_balance"] = initial_balance
         cfg["initial_balance"] = initial_balance
         
+        # Reset daily baseline for paper account so Today's PnL is 0.00 USD
+        today = datetime.now().strftime("%Y-%m-%d")
+        daily = self.state.get("daily") or {}
+        daily["date"] = today
+        daily["start_balance_paper"] = initial_balance
+        daily["halted_paper"] = False
+        daily["notified_paper"] = False
+        self.state["daily"] = daily
+
         # Keep live trades, but remove paper trades
         new_trades = [t for t in self.state.get("trades", []) if t.get("is_live") is True]
         self.state["trades"] = new_trades

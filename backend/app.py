@@ -229,28 +229,38 @@ def process_signal_evaluation(symbol: str, payload: dict, json_signal: dict, mar
             logger.warning(f"Sniper engine order placement error: {se}")
 
         if should_push:
-            logger.info(f"[{source_tag}] Pushing alert for {symbol} ({sig_type.upper()}): {push_reason}")
-            log_monitor_event(f"🎯 [{source_tag}] {symbol} ({push_reason})！正在向通道推送...")
+            notify_cfg = yaml_cfg.get("notifications", {})
+            notify_enabled = notify_cfg.get("enabled", False)
+            notify_on_signal = notify_cfg.get("notify_on_signal", False)
 
-            tp_targets_str = ", ".join([f"${t}" for t in tp_list])
-            sig_label = "建议做多 (LONG) 📈" if sig_type == "long" else "建议做空 (SHORT) 📉"
-            emoji = "📈" if sig_type == "long" else "📉"
+            if notify_enabled and notify_on_signal:
+                logger.info(f"[{source_tag}] Pushing alert for {symbol} ({sig_type.upper()}): {push_reason}")
+                log_monitor_event(f"🎯 [{source_tag}] {symbol} ({push_reason})！正在向通道推送...")
 
-            signal_header = (
-                f"🚨 *[{source_tag}警报] {symbol} {emoji}*\n"
-                f"📌 触发依据：{push_reason}\n"
-                f"🔥 交易信号：{sig_label}\n"
-                f"🔥 置信度评分：{conf} / 10\n"
-                f"----------------------------------------\n"
-                f"📥 合理吃单区间：${lower_entry} - ${upper_entry}\n"
-                f"🛡️ 防守线 (止损)：${sl}\n"
-                f"🎯 阶梯止盈目标：{tp_targets_str}\n"
-                f"----------------------------------------\n\n"
-            )
+                tp_targets_str = ", ".join([f"${t}" for t in tp_list])
+                sig_label = "建议做多 (LONG) 📈" if sig_type == "long" else "建议做空 (SHORT) 📉"
+                emoji = "📈" if sig_type == "long" else "📉"
 
-            notifier = Notifier(yaml_cfg)
-            notifier.send_notification(f"{source_tag}：{symbol}", signal_header + markdown_report)
-            log_monitor_event(f"📬 [{source_tag}] {symbol} 交易警报已送达。")
+                signal_header = (
+                    f"🚨 *[{source_tag}警报] {symbol} {emoji}*\n"
+                    f"📌 触发依据：{push_reason}\n"
+                    f"🔥 交易信号：{sig_label}\n"
+                    f"🔥 置信度评分：{conf} / 10\n"
+                    f"----------------------------------------\n"
+                    f"📥 合理吃单区间：${lower_entry} - ${upper_entry}\n"
+                    f"🛡️ 防守线 (止损)：${sl}\n"
+                    f"🎯 阶梯止盈目标：{tp_targets_str}\n"
+                    f"----------------------------------------\n\n"
+                )
+
+                try:
+                    notifier = Notifier(yaml_cfg)
+                    notifier.send_notification(f"{source_tag}：{symbol}", signal_header + markdown_report)
+                    log_monitor_event(f"📬 [{source_tag}] {symbol} 交易警报已送达。")
+                except Exception as ne:
+                    logger.warning(f"Failed to push notification: {ne}")
+            else:
+                log_monitor_event(f"ℹ️ [{source_tag}] {symbol} 触发诊断信号 ({push_reason})。（信号诊断推送开关已关闭，静默跳过推送）")
 
             last_signals[symbol] = {
                 "signal_type": sig_type,
@@ -273,10 +283,13 @@ class ConfigUpdate(BaseModel):
     timeframes: List[str]
     symbols: List[str]
     fib_lookback: int
+    scan_interval_minutes: Optional[int] = 15
     llm_model: str
     llm_temp: float
     llm_max_tokens: int
     notify_enabled: bool
+    notify_on_signal: Optional[bool] = False
+    notify_on_trade: Optional[bool] = True
     notify_channels: List[str]
     telegram_chat_id: Optional[str] = ""
     # Keys
@@ -397,10 +410,13 @@ def get_config():
         "timeframes": yaml_cfg.get("timeframes", ["1M", "1W", "1D", "4h", "1h"]),
         "symbols": yaml_cfg.get("symbols", ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "ZEC/USDT"]),
         "fib_lookback": yaml_cfg.get("fibonacci", {}).get("lookback_days", 100),
+        "scan_interval_minutes": yaml_cfg.get("scan_interval_minutes", 15),
         "llm_model": yaml_cfg.get("llm", {}).get("model", "gpt-4o"),
         "llm_temp": yaml_cfg.get("llm", {}).get("temperature", 0.1),
         "llm_max_tokens": yaml_cfg.get("llm", {}).get("max_tokens", 3000),
         "notify_enabled": yaml_cfg.get("notifications", {}).get("enabled", False),
+        "notify_on_signal": yaml_cfg.get("notifications", {}).get("notify_on_signal", False),
+        "notify_on_trade": yaml_cfg.get("notifications", {}).get("notify_on_trade", True),
         "notify_channels": yaml_cfg.get("notifications", {}).get("channels", []),
         "telegram_chat_id": yaml_cfg.get("notifications", {}).get("telegram", {}).get("chat_id", ""),
         
@@ -422,6 +438,7 @@ def save_config(cfg: ConfigUpdate):
         yaml_cfg = {
             "symbol": cfg.symbol,
             "exchange": cfg.exchange,
+            "scan_interval_minutes": cfg.scan_interval_minutes or 15,
             "timeframes": cfg.timeframes,
             "symbols": cfg.symbols,
             "fibonacci": {
@@ -434,6 +451,8 @@ def save_config(cfg: ConfigUpdate):
             },
             "notifications": {
                 "enabled": cfg.notify_enabled,
+                "notify_on_signal": bool(cfg.notify_on_signal),
+                "notify_on_trade": bool(cfg.notify_on_trade),
                 "channels": cfg.notify_channels,
                 "telegram": {
                     "chat_id": cfg.telegram_chat_id
@@ -441,6 +460,9 @@ def save_config(cfg: ConfigUpdate):
             }
         }
         write_yaml_config(yaml_cfg)
+        
+        # Sync sniper engine to auto-cancel pending orders of removed symbols
+        sniper_engine.sync_watchlist_symbols(cfg.symbols)
         
         # Update .env
         env_updates = {
@@ -1016,12 +1038,13 @@ def start_background_monitor():
     # 2. Thread 2: 1-Hour LLM Deep Diagnostic Loop
     def hourly_llm_monitor_loop():
         time.sleep(10)
-        logger.info("1-Hour LLM Diagnostic Monitor Loop started.")
-        log_monitor_event("🤖 1小时大模型诊断后台服务已启动。建议降低掉无用 API 消耗。")
+        logger.info("LLM Diagnostic Monitor Loop started.")
+        log_monitor_event("🤖 大模型智能诊断后台盯盘服务已启动（已优化为短线15分钟敏捷调频）。")
 
         while True:
             try:
                 yaml_cfg = load_yaml_config()
+                scan_mins = int(yaml_cfg.get("scan_interval_minutes", 15))
                 enabled = yaml_cfg.get("notifications", {}).get("enabled", False)
                 symbols = yaml_cfg.get("symbols", ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "ZEC/USDT"])
                 exchange_id = yaml_cfg.get("exchange", "binance")
@@ -1040,8 +1063,8 @@ def start_background_monitor():
                 sniper_active = (sniper_cfg.get("mode", "off") != "off")
                 
                 if (enabled or sniper_active) and api_key:
-                    log_monitor_event(f"🔄 [1小时定时诊断] 启动新一轮大模型深度诊盘，目标币种：{', '.join(symbols)}")
-                    logger.info(f"[1H LLM Monitor] Starting hourly cycle for symbols: {symbols}")
+                    log_monitor_event(f"🔄 [{scan_mins}分钟定时诊断] 启动新一轮大模型深度诊盘，目标币种：{', '.join(symbols)}")
+                    logger.info(f"[{scan_mins}M LLM Monitor] Starting cycle for symbols: {symbols}")
                     for symbol in symbols:
                         try:
                             log_monitor_event(f"📊 [正在诊断] 币对：{symbol}... 正在拉取多周期 K 线并计算指标")
@@ -1069,20 +1092,21 @@ def start_background_monitor():
                                 system_prompt=load_system_prompt(root_dir)
                             )
                             json_signal, markdown_report = agent.analyze(payload)
-                            process_signal_evaluation(symbol, payload, json_signal, markdown_report, yaml_cfg, source_tag="1H定时诊断")
+                            process_signal_evaluation(symbol, payload, json_signal, markdown_report, yaml_cfg, source_tag=f"{scan_mins}M定时诊断")
                         except Exception as inner_e:
-                            logger.error(f"[1H LLM Monitor] Error analyzing {symbol}: {inner_e}")
+                            logger.error(f"[{scan_mins}M LLM Monitor] Error analyzing {symbol}: {inner_e}")
                             log_monitor_event(f"❌ [诊断失败] {symbol}。原因：{str(inner_e)}")
-                    log_monitor_event("😴 本轮 1 小时诊断完成，伏击表格已更新。后台将休眠 1 小时，价格监听（10秒）持续进行中...")
+                    log_monitor_event(f"😴 本轮 {scan_mins} 分钟诊断完成，伏击表格已更新。后台休眠 {scan_mins} 分钟，价格监听（10秒）持续进行中...")
                     
-                    # Sleep for 1 hour (3600 seconds), checking every 10 seconds
-                    for _ in range(360):
+                    # Sleep for scan_mins * 60 seconds, checking every 10 seconds
+                    total_iterations = max(1, int(scan_mins * 60 / 10))
+                    for _ in range(total_iterations):
                         time.sleep(10)
                 else:
                     log_monitor_event("⏳ 自动盯盘后台运行中（未开启通知推送/狙击引擎未启动或未配置 API Key，请前往配置页面检查）")
                     time.sleep(30)
             except Exception as e:
-                logger.error(f"[1H LLM Monitor] Loop error: {e}")
+                logger.error(f"[LLM Monitor] Loop error: {e}")
                 log_monitor_event(f"⚠️ [盯盘异常] 异常信息：{str(e)}")
                 time.sleep(30)
 

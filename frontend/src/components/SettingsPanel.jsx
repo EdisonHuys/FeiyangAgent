@@ -7,10 +7,13 @@ export default function SettingsPanel({ apiBase }) {
     exchange: 'binance',
     timeframes: ['1M', '1W', '1D', '4h', '1h'],
     fib_lookback: 100,
+    scan_interval_minutes: 15,
     llm_model: 'gpt-4o',
     llm_temp: 0.1,
     llm_max_tokens: 3000,
     notify_enabled: false,
+    notify_on_signal: false,
+    notify_on_trade: true,
     notify_channels: ['telegram'],
     telegram_chat_id: '',
     openai_api_key: '',
@@ -348,6 +351,22 @@ export default function SettingsPanel({ apiBase }) {
           </div>
 
           <div className="form-group">
+            <label className="form-label">后台 AI 自动诊断扫描频率 (分钟)</label>
+            <select 
+              name="scan_interval_minutes" 
+              value={config.scan_interval_minutes || 15} 
+              onChange={handleChange} 
+              className="form-control"
+            >
+              <option value={5}>5 分钟 (超极速短线)</option>
+              <option value={10}>10 分钟 (极速敏捷)</option>
+              <option value={15}>15 分钟 (推荐 - 黄金短线波段)</option>
+              <option value={30}>30 分钟 (标准短线)</option>
+              <option value={60}>60 分钟 (1小时慢速)</option>
+            </select>
+          </div>
+
+          <div className="form-group">
             <label className="form-label">LLM API Key (OpenAI / DeepSeek / Gemini)</label>
             <input 
               type="password" 
@@ -451,6 +470,38 @@ export default function SettingsPanel({ apiBase }) {
 
           {config.notify_enabled && (
             <div style={{ padding: '0.75rem', background: 'rgba(255,255,255,0.01)', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.05)' }}>
+              <div className="form-group" style={{ marginBottom: '1rem' }}>
+                <label className="form-label">推送触发事件策略开关</label>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginTop: '0.5rem' }}>
+                  <div className="checkbox-group">
+                    <input 
+                      type="checkbox" 
+                      name="notify_on_trade" 
+                      checked={config.notify_on_trade !== false} 
+                      onChange={handleChange} 
+                      id="notify_on_trade_chk"
+                      className="checkbox-input"
+                    />
+                    <label htmlFor="notify_on_trade_chk" style={{ cursor: 'pointer', fontSize: '0.85rem' }}>
+                      ⚡ <strong>开仓与平仓履约推送</strong> (建仓成单、TP1 止盈保本、TP2 平仓、SL 止损、反向平仓)
+                    </label>
+                  </div>
+                  <div className="checkbox-group">
+                    <input 
+                      type="checkbox" 
+                      name="notify_on_signal" 
+                      checked={!!config.notify_on_signal} 
+                      onChange={handleChange} 
+                      id="notify_on_signal_chk"
+                      className="checkbox-input"
+                    />
+                    <label htmlFor="notify_on_signal_chk" style={{ cursor: 'pointer', fontSize: '0.85rem' }}>
+                      🤖 <strong>AI 诊断信号生成推送</strong> (每次诊断产生新低多/高空信号时推送 - 建议关闭防骚扰)
+                    </label>
+                  </div>
+                </div>
+              </div>
+
               <div className="form-group">
                 <label className="form-label">通知管道选择</label>
                 <div style={{ display: 'flex', gap: '1rem', marginTop: '0.5rem' }}>

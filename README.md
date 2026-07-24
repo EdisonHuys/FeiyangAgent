@@ -16,13 +16,18 @@
 
 - **桌面客户端（Native GUI）**：采用 `pywebview` 封装原生的 macOS Cocoa 窗口，内置系统 Dock 栏图标与响应式界面，无需浏览器交互。
 - **交互式 K 线图表**：集成 TradingView 高性能 K 线图，支持实时缩放拖拽与多指标动态叠加（MA5/10/30、EMA55、布林带）。
+- **⏱️ 15分钟敏捷 AI 诊断轮询**：
+  - 支持在 UI 界面与 `config.yaml` 中灵活配置后台 AI 诊断频率（5分钟、10分钟、15分钟黄金波段、30分钟、60分钟）。
+  - 配合 10 秒级高频价格/止盈止损实时监控，兼顾插针吃单敏捷度与大模型研判质量。
 - **🎯 智能狙击控制台 (Sniper Engine)**：
   - **模拟盘与实盘双模式**：支持模拟盘仿真推演及 CCXT 实盘合约（Binance / OKX / Bybit）真实下单。
+  - **即时吃单与智能反向平仓**：信号触发时若币价已落入埋伏区间，瞬间执行市价吃单成单；若已有反向持仓，自动执行市价平仓并启动新方向建仓。
+  - **自选币种自动撤单防护**：自选列表中删除币种时，系统自动撤销该币种挂单区内所有未成交的旧埋伏单。
   - **智能风控与动态杠杆**：依据 LLM 诊断置信度（Confidence Score）智能匹配 35x~70x 杠杆，自动管理仓位价值与保证金比例。
   - **10U 微型资金适配 (10U Micro-Capital Auto-Protector)**：专门针对 $10~$20U 小资金账户，自动优化调整名义价值，突破交易所最小交易限制。
   - **双保险自动风控与推损保本**：达到 TP1 自动平仓 50% 锁定收益，并**自动上移防守止损线至建仓成本价**（锁定无风险持仓）；触及止损自动触发市价平仓双保险。
-- **可视化配置管理**：内置配置面板，可直接在 GUI 界面中动态配置 OpenAI / DeepSeek / Gemini API Key、自定义 Base URL、实盘 API Key / Secret 及推送渠道 Token，即时生效。
-- **多周期共振诊断**：覆盖 月线(1M)、周线(1W)、日线(1D)、4小时(4h)、1小时(1h) 多维周期，智能判断关键防守位与支撑阻力。
+- **可视化配置管理**：内置配置面板，可直接在 GUI 界面中动态配置 OpenAI / DeepSeek / Gemini API Key、自定义 Base URL、扫描频次、实盘 API Key / Secret 及推送策略，即时生效。
+- **多周期共振诊断**：覆盖 月线(1M)、周线(1W)、日线(1D)、4小时(4h)、1小时(1h) 多维周期，智能判断低多/高空关键防守位与支撑阻力。
 - **📈 历史回测实验室 (Walk-Forward Backtester)**：用真实历史 K 线逐根回放完整生产链路（指标 → LLM 诊断 → 狙击引擎模拟成交），在不花一分钱本金的前提下验证策略期望值。回测与生产共用同一套限价成交、TP1 半仓保本、双保险止损、手续费/滑点与杠杆安全帽逻辑。支持 GUI 面板与 CLI 两种运行方式。
 - **🛡️ 机构级风控体系**：
   - **杠杆安全帽**：按止损距离自动降级杠杆，保证止损永远先于交易所强平触发，风控预算真实有效。
@@ -30,7 +35,7 @@
   - **挂单过期机制**：超过有效期（默认 24h）未成交的挂单自动撤销。
   - **全成本建模**：手续费、滑点、资金费（8 小时 Funding）全部计入 PnL 与胜率统计。
   - **实盘交易所侧保护单**：实盘成交后自动补挂 reduceOnly 止损单，App 崩溃/断网也有保护。
-- **实时盯盘与多渠道推送**：提供 24H 实时盯盘运行日志控制台；行情诊断、埋伏挂单、履约建仓、阶段止盈推损保本及风控平仓全流程自动推送至 Telegram、Server酱或 Bark。
+- **🔔 消息推送分层控制**：支持独立开启/关闭 **交易履约推送**（建仓成单、TP1止盈推保本、TP2平仓、SL止损）与 **诊断信号生成推送**，拒绝频繁信息骚扰。
 
 ---
 
@@ -42,8 +47,8 @@ FeiyangAgent/
 │   ├── app.py                # FastAPI 服务端（API 接口、K线数据、设置管理、盯盘服务）
 │   ├── data_fetcher.py       # CCXT 交易所数据拉取与多周期处理
 │   ├── indicators.py         # 技术指标与 Fibonacci 极值点位计算
-│   ├── agent.py              # LLM Prompt 构造、推理查询与交易逻辑校验
-│   ├── sniper_engine.py      # 🎯 AI 智能狙击交易引擎（模拟盘/实盘、仓位风控、推损保本）
+│   ├── agent.py              # LLM Prompt 构造、双向低多高空推理与逻辑校验
+│   ├── sniper_engine.py      # 🎯 AI 智能狙击交易引擎（模拟盘/实盘、反向平仓、即时吃单）
 │   ├── backtest.py           # 📈 Walk-Forward 历史回测引擎（复用生产级狙击逻辑）
 │   ├── trades.json           # 狙击交易记录与持仓状态持久化文件
 │   └── notifier.py           # Telegram / Server酱 / Bark 消息推送
@@ -52,7 +57,7 @@ FeiyangAgent/
 │   ├── src/
 │   │   ├── components/
 │   │   │   ├── KLineChart.jsx      # TradingView 图表组件
-│   │   │   ├── SettingsPanel.jsx   # 密钥与核心参数配置面板
+│   │   │   ├── SettingsPanel.jsx   # 密钥与扫描频次/推送策略配置面板
 │   │   │   ├── BacktestPanel.jsx   # 📈 历史回测实验室面板
 │   │   │   └── SniperDashboard.jsx # 🎯 智能狙击交易控制台面板
 │   │   ├── App.jsx             # 主界面布局、盯盘日志与诊断卡片渲染
@@ -128,7 +133,7 @@ python main.py --dry-run
 python main.py --backtest --symbol BTC/USDT --bt-days 14 --bt-step 4 --bt-calls 60
 ```
 
-参数说明：`--bt-days` 回测天数（≤90）、`--bt-step` 每隔多少小时做一次 LLM 诊断（生产为 1h，步长越大越省额度）、`--bt-calls` LLM 调用预算上限。也可以直接在 GUI 的「📈 历史回测」标签页中图形化运行并查看权益曲线。
+参数说明：`--bt-days` 回测天数（≤90）、`--bt-step` 每隔多少小时做一次 LLM 诊断（步长越大越省额度）、`--bt-calls` LLM 调用预算上限。也可以直接在 GUI 的「📈 历史回测」标签页中图形化运行并查看权益曲线。
 
 ---
 
@@ -141,6 +146,17 @@ python main.py --backtest --symbol BTC/USDT --bt-days 14 --bt-step 4 --bt-calls 
 symbol: "BTC/USDT"
 exchange: "binance"
 
+# 自选监控交易对列表
+symbols:
+  - "BTC/USDT"
+  - "ETH/USDT"
+  - "SOL/USDT"
+  - "BNB/USDT"
+  - "ZEC/USDT"
+
+# 后台 AI 自动诊断扫描频率 (分钟)
+scan_interval_minutes: 15
+
 # 多周期分析范围
 timeframes:
   - "1M"
@@ -149,9 +165,9 @@ timeframes:
   - "4h"
   - "1h"
 
-# 极值回溯参数
+# 极值回溯参数 (天数)
 fibonacci:
-  lookback_days: 100
+  lookback_days: 14
 
 # 大模型参数
 llm:
@@ -159,9 +175,11 @@ llm:
   temperature: 0.1
   max_tokens: 3000
 
-# 消息推送
+# 消息推送策略配置
 notifications:
-  enabled: true
+  enabled: true       # 全局推送总开关
+  notify_on_signal: false  # 开单诊断信号推送开关 (建议关闭以防频繁骚扰)
+  notify_on_trade: true   # 开仓/平仓/止盈止损履约推送开关 (默认开启)
   channels:
     - "telegram"      # 支持 telegram, serverchan, bark
   telegram:
@@ -176,7 +194,7 @@ notifications:
 
 系统内置的狙击交易引擎支持两种模式：
 
-1. **模拟盘模式 (Paper Trading)**：使用初始虚拟资金（如 $10,000 USD）进行无风险实战推演，自动记录胜率、盈亏比与回撤曲线。
+1. **模拟盘模式 (Paper Trading)**：使用初始虚拟资金（如 $10,000 USD）进行无风险实战推演，自动记录胜率、盈亏比与回撤曲线。支持一键重置资金且精准同步日内基准。
 2. **实盘合约模式 (Live Contract)**：在狙击控制台配置 Binance / OKX / Bybit 的 API Key & Secret 即可开启动态杠杆合约自动交易。系统包含双保险紧急市价平仓机制与 10U 小资金微型仓位适配保障。
 
 ---
@@ -213,4 +231,4 @@ notifications:
 
 ## ⚠️ 免责声明
 
-本系统输出的所有诊断报告与交易信号仅供技术研究与参考，**不构成任何投资建议或交易依据**。实盘交易存在极高风险，请严格控制资金风控。
+本项目输出的所有诊断报告与交易信号仅供技术研究与参考，**不构成任何投资建议或交易依据**。实盘交易存在极高风险，请严格控制资金风控。
