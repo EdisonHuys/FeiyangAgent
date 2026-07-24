@@ -665,8 +665,8 @@ class SniperEngine:
                 
                 # If API call failed (e.g. rate limit), do not close active trades!
                 if real_positions is not None:
-                    # Create a map for fast lookup
-                    real_pos_map = {pos["symbol"]: pos for pos in real_positions}
+                    # Create a map for fast lookup by (symbol, side)
+                    real_pos_map = {(pos["symbol"], pos["side"]): pos for pos in real_positions}
                     
                     updated = False
                     synced_trades = []
@@ -674,17 +674,19 @@ class SniperEngine:
                     for t in filtered:
                         if t["status"] in ["filled", "tp1_hit", "closed_tp", "closed_sl"]:
                             symbol = t["symbol"]
-                            if symbol in real_pos_map:
+                            side = t["signal_type"].lower()
+                            key = (symbol, side)
+                            if key in real_pos_map:
                                 # Self-healing: if trade was mistakenly closed in DB but still active on exchange, restore it!
                                 if t["status"] in ["closed_tp", "closed_sl"]:
-                                    logger.info(f"[SniperEngine] Self-healing: Position {symbol} is still active on exchange. Restoring status to filled.")
+                                    logger.info(f"[SniperEngine] Self-healing: Position {symbol} ({side}) is still active on exchange. Restoring status to filled.")
                                     t["status"] = "filled"
                                     t["closed_at"] = None
                                     t["close_reason"] = ""
                                     updated = True
                                 
                                 # Update system active trade stats with real exchange stats
-                                real_pos = real_pos_map[symbol]
+                                real_pos = real_pos_map[key]
                                 t["current_price"] = real_pos["mark_price"]
                                 t["pnl_usd"] = real_pos["unrealized_pnl"]
                                 t["pnl_percent"] = real_pos["unrealized_pnl_percent"]
@@ -692,11 +694,11 @@ class SniperEngine:
                                 t["unrealized_pnl_percent"] = real_pos["unrealized_pnl_percent"]
                                 
                                 # Remove from real_pos_map so it's not marked as external
-                                real_pos_map.pop(symbol)
+                                real_pos_map.pop(key)
                             else:
                                 # If active in system but no longer on exchange -> Close it
                                 if t["status"] in ["filled", "tp1_hit"]:
-                                    logger.info(f"[SniperEngine] Syncing external closure for {symbol}.")
+                                    logger.info(f"[SniperEngine] Syncing external closure for {symbol} ({side}).")
                                     t["status"] = "closed_tp" if t.get("pnl_usd", 0.0) >= 0 else "closed_sl"
                                     t["closed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                                     t["close_reason"] = "🗑️ 交易所侧仓位已平仓，系统自动同步平仓状态"
@@ -709,13 +711,13 @@ class SniperEngine:
                     self._closed_external_symbols = {s: exp for s, exp in self._closed_external_symbols.items() if exp > _now}
                     
                     external_trades = []
-                    for symbol, pos in real_pos_map.items():
+                    for (symbol, side), pos in real_pos_map.items():
                         # Skip if this symbol was manually closed and tombstone hasn't expired
                         if symbol in self._closed_external_symbols:
                             logger.info(f"[SniperEngine] Skipping tombstoned symbol {symbol} from external positions.")
                             continue
                         mock_t = {
-                            "id": f"external-{pos['symbol']}",
+                            "id": f"external-{pos['symbol']}-{pos['side']}",
                             "symbol": pos["symbol"],
                             "signal_type": pos["side"],
                             "status": "filled",
