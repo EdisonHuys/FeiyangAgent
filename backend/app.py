@@ -728,6 +728,38 @@ def get_sniper_trades():
         "trades": sniper_engine.get_trades()
     }
 
+@app.post("/api/sniper/sync-positions-force")
+def sync_positions_force():
+    try:
+        # Clear ALL caches to force a completely fresh pull from exchange
+        sniper_engine._live_positions_cache = None
+        sniper_engine._live_positions_cache_time = 0
+        sniper_engine._live_balance_cache = None
+        sniper_engine._live_balance_cache_time = 0
+        sniper_engine._exchange_instance = None
+        sniper_engine._last_positions_error = None
+        
+        # Trigger positions sync (will call exchange fresh)
+        trades_list = sniper_engine.get_trades()
+        
+        # Check if the fetch failed and recorded an error
+        if sniper_engine._last_positions_error:
+            return {
+                "status": "error",
+                "message": f"同步持仓失败：{sniper_engine._last_positions_error}"
+            }
+            
+        return {
+            "status": "success",
+            "message": "已成功同步交易所持仓数据！",
+            "trades": trades_list
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"强制同步异常：{e}"
+        }
+
 @app.post("/api/sniper/config")
 def update_sniper_config(req: SniperConfigRequest):
     new_cfg = {k: v for k, v in req.dict().items() if v is not None}

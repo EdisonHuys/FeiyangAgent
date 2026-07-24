@@ -18,6 +18,14 @@ class SniperEngine:
         # API handlers (manual close / config update) run on different threads.
         self._lock = threading.RLock()
         self.state = self._load_state()
+        self._live_positions_cache = None
+        self._live_positions_cache_time = 0
+        self._last_positions_error = None
+        self._live_balance_cache = None
+        self._live_balance_cache_time = 0
+        # Tombstone: symbols manually closed by user; excluded from position list for 90s
+        # to avoid re-appearing due to exchange processing lag
+        self._closed_external_symbols = {}  # {symbol: expiry_timestamp}
 
     def _load_state(self):
         default_state = {
@@ -356,6 +364,11 @@ class SniperEngine:
 
     def update_config(self, new_cfg):
         with self._lock:
+            # Reset exchange client cache, balance cache, and positions cache when config changes
+            self._exchange_instance = None
+            self._live_positions_cache = None
+            self._live_balance_cache = None
+            
             cfg = self.state.get("config", {})
             for k, v in new_cfg.items():
                 if k in cfg:
@@ -378,15 +391,22 @@ class SniperEngine:
             filtered_trades = [t for t in trades if t.get("is_live") is True]
             account_bal = round(cfg.get("live_account_balance", 0.0), 2)
             if cfg.get("live_api_key") and cfg.get("live_secret"):
-                try:
-                    exchange, ex_id = self._init_live_ccxt()
-                    bal = exchange.fetch_balance()
-                    live_usdt = float(bal.get("total", {}).get("USDT", 0.0))
-                    account_bal = round(live_usdt, 2)
-                    cfg["live_account_balance"] = account_bal
-                    self._save_state()
-                except Exception as e:
-                    logger.warning(f"[SniperEngine] Live balance auto-sync warning: {e}")
+                # Use cached balance (60s TTL) to avoid hammering the exchange
+                _now = time.time()
+                if self._live_balance_cache is not None and (_now - self._live_balance_cache_time) < 60.0:
+                    account_bal = self._live_balance_cache
+                else:
+                    try:
+                        exchange, ex_id = self._init_live_ccxt()
+                        bal = exchange.fetch_balance()
+                        live_usdt = float(bal.get("total", {}).get("USDT", 0.0))
+                        account_bal = round(live_usdt, 2)
+                        self._live_balance_cache = account_bal
+                        self._live_balance_cache_time = _now
+                        cfg["live_account_balance"] = account_bal
+                        self._save_state()
+                    except Exception as e:
+                        logger.warning(f"[SniperEngine] Live balance auto-sync warning: {e}")
         else:
             filtered_trades = [t for t in trades if t.get("is_live") is not True]
             account_bal = round(cfg.get("paper_account_balance", 10000.0), 2)
@@ -460,6 +480,69 @@ class SniperEngine:
             "config": dashboard_cfg
         }
 
+    def _fetch_live_positions(self):
+        """Fetch active positions from the exchange API and normalize them with caching."""
+        now = time.time()
+        # Return cache if it is fresh (60s TTL)
+        if self._live_positions_cache is not None and (now - self._live_positions_cache_time) < 60.0:
+            return self._live_positions_cache
+            
+        try:
+            exchange, ex_id = self._init_live_ccxt()
+            if hasattr(exchange, 'fetch_positions'):
+                raw_positions = exchange.fetch_positions()
+                open_pos = []
+                for p in raw_positions:
+                    contracts = float(p.get("contracts", 0.0) or 0.0)
+                    notional = abs(float(p.get("notional", 0.0) or 0.0))
+                    entry_price = float(p.get("entryPrice", 0.0) or 0.0)
+                    
+                    if contracts > 0 or notional > 0 or entry_price > 0:
+                        symbol = p.get("symbol", "")
+                        if not symbol:
+                            continue
+                        clean_sym = symbol.split(":")[0] if ":" in symbol else symbol
+                        
+                        side_str = str(p.get("side", "long")).lower()
+                        normalized_side = "long" if ("buy" in side_str or "long" in side_str) else "short"
+                        
+                        mark_price = float(p.get("markPrice", 0.0) or 0.0)
+                        leverage = int(p.get("leverage", 1) or 1)
+                        unrealized_pnl = float(p.get("unrealizedPnl", 0.0) or 0.0)
+                        margin = float(p.get("initialMargin", 0.0) or (notional / leverage if leverage else 0.0))
+                        
+                        pct = float(p.get("percentage", 0.0) or 0.0)
+                        if pct == 0.0 and entry_price > 0:
+                            if normalized_side == "long":
+                                pct = (mark_price - entry_price) / entry_price * 100.0
+                            else:
+                                pct = (entry_price - mark_price) / entry_price * 100.0
+                        
+                        open_pos.append({
+                            "symbol": clean_sym,
+                            "raw_symbol": symbol,
+                            "side": normalized_side,
+                            "size": contracts if contracts > 0 else (notional / entry_price if entry_price > 0 else 0.0),
+                            "notional": notional,
+                            "entry_price": entry_price,
+                            "mark_price": mark_price,
+                            "leverage": leverage,
+                            "margin": margin,
+                            "unrealized_pnl": unrealized_pnl,
+                            "unrealized_pnl_percent": pct
+                        })
+                self._live_positions_cache = open_pos
+                self._live_positions_cache_time = now
+                self._last_positions_error = None
+                return open_pos
+        except Exception as e:
+            self._last_positions_error = str(e)
+            logger.warning(f"[SniperEngine] Failed to fetch live positions: {e}")
+            if self._live_positions_cache is not None:
+                logger.info("[SniperEngine] Returning stale cached positions due to fetch exception.")
+                return self._live_positions_cache
+        return None
+
     def get_trades(self, mode_filter=None):
         """Thread-safe entry point."""
         with self._lock:
@@ -472,10 +555,98 @@ class SniperEngine:
 
         if target_mode == "live":
             filtered = [t for t in trades if t.get("is_live") is True]
+            
+            # Synchronize active positions with the real exchange
+            if cfg.get("live_api_key") and cfg.get("live_secret"):
+                real_positions = self._fetch_live_positions()
+                
+                # If API call failed (e.g. rate limit), do not close active trades!
+                if real_positions is not None:
+                    # Create a map for fast lookup
+                    real_pos_map = {pos["symbol"]: pos for pos in real_positions}
+                    
+                    updated = False
+                    synced_trades = []
+                    
+                    for t in filtered:
+                        if t["status"] in ["filled", "tp1_hit", "closed_tp", "closed_sl"]:
+                            symbol = t["symbol"]
+                            if symbol in real_pos_map:
+                                # Self-healing: if trade was mistakenly closed in DB but still active on exchange, restore it!
+                                if t["status"] in ["closed_tp", "closed_sl"]:
+                                    logger.info(f"[SniperEngine] Self-healing: Position {symbol} is still active on exchange. Restoring status to filled.")
+                                    t["status"] = "filled"
+                                    t["closed_at"] = None
+                                    t["close_reason"] = ""
+                                    updated = True
+                                
+                                # Update system active trade stats with real exchange stats
+                                real_pos = real_pos_map[symbol]
+                                t["current_price"] = real_pos["mark_price"]
+                                t["pnl_usd"] = real_pos["unrealized_pnl"]
+                                t["pnl_percent"] = real_pos["unrealized_pnl_percent"]
+                                t["unrealized_pnl_usd"] = real_pos["unrealized_pnl"]
+                                t["unrealized_pnl_percent"] = real_pos["unrealized_pnl_percent"]
+                                
+                                # Remove from real_pos_map so it's not marked as external
+                                real_pos_map.pop(symbol)
+                            else:
+                                # If active in system but no longer on exchange -> Close it
+                                if t["status"] in ["filled", "tp1_hit"]:
+                                    logger.info(f"[SniperEngine] Syncing external closure for {symbol}.")
+                                    t["status"] = "closed_tp" if t.get("pnl_usd", 0.0) >= 0 else "closed_sl"
+                                    t["closed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                    t["close_reason"] = "🗑️ 交易所侧仓位已平仓，系统自动同步平仓状态"
+                                    updated = True
+                        synced_trades.append(t)
+                    
+                    # Add remaining positions from map as mock external trades
+                    # Skip any symbols that were recently manually closed (tombstone)
+                    _now = time.time()
+                    self._closed_external_symbols = {s: exp for s, exp in self._closed_external_symbols.items() if exp > _now}
+                    
+                    external_trades = []
+                    for symbol, pos in real_pos_map.items():
+                        # Skip if this symbol was manually closed and tombstone hasn't expired
+                        if symbol in self._closed_external_symbols:
+                            logger.info(f"[SniperEngine] Skipping tombstoned symbol {symbol} from external positions.")
+                            continue
+                        mock_t = {
+                            "id": f"external-{pos['symbol']}",
+                            "symbol": pos["symbol"],
+                            "signal_type": pos["side"],
+                            "status": "filled",
+                            "confidence_score": "-",
+                            "entry_min": "-",
+                            "entry_max": "-",
+                            "planned_entry": "-",
+                            "actual_entry": pos["entry_price"],
+                            "stop_loss": "-",
+                            "take_profit_targets": [],
+                            "leverage": pos["leverage"],
+                            "position_size_usd": round(pos["notional"], 2),
+                            "margin_usd": round(pos["margin"], 2),
+                            "entered_at": "-",
+                            "closed_at": None,
+                            "pnl_usd": round(pos["unrealized_pnl"], 2),
+                            "pnl_percent": round(pos["unrealized_pnl_percent"], 2),
+                            "unrealized_pnl_usd": round(pos["unrealized_pnl"], 2),
+                            "unrealized_pnl_percent": round(pos["unrealized_pnl_percent"], 2),
+                            "is_live": True,
+                            "is_external": True,
+                            "current_price": pos["mark_price"]
+                        }
+                        external_trades.append(mock_t)
+                    
+                    if updated:
+                        self._save_state()
+                    
+                    all_returned_trades = synced_trades + external_trades
+                    return sorted(all_returned_trades, key=lambda x: x.get("entered_at", "") or "", reverse=True)
         else:
             filtered = [t for t in trades if t.get("is_live") is not True]
-
-        return sorted(filtered, key=lambda x: x.get("entered_at", ""), reverse=True)
+            
+        return sorted(filtered, key=lambda x: x.get("entered_at", "") or "", reverse=True)
 
     def calculate_trade_params(self, balance, risk_pct, entry_price, stop_loss, confidence, max_lev=70):
         cfg = self.state.get("config", {})
@@ -541,6 +712,47 @@ class SniperEngine:
             return self._close_position_manually_impl(trade_id)
 
     def _close_position_manually_impl(self, trade_id):
+        self._live_positions_cache = None
+        if str(trade_id).startswith("external-"):
+            # This is an external/manual position from the exchange
+            symbol = str(trade_id).replace("external-", "")
+            try:
+                # Initialize CCXT exchange client
+                exchange, ex_id = self._init_live_ccxt()
+                
+                # Fetch positions to find exact size and side
+                real_positions = self._fetch_live_positions()
+                match_pos = next((pos for pos in real_positions if pos["symbol"] == symbol), None)
+                if not match_pos:
+                    return {"status": "error", "message": f"未在交易所找到 {symbol} 的真实仓位，可能已被平仓或过期。"}
+                
+                side = match_pos["side"]
+                size = match_pos["size"]
+                
+                # Execute CCXT market close order
+                close_side = "sell" if side == "long" else "buy"
+                ccxt_symbol = match_pos["raw_symbol"]
+                
+                # Send order to exchange
+                order = exchange.create_order(
+                    symbol=ccxt_symbol,
+                    type="market",
+                    side=close_side,
+                    amount=size,
+                    params={"reduceOnly": True}
+                )
+                logger.info(f"[SniperEngine] Handled manual close of external position: {symbol} size {size} side {side} order_id {order.get('id')}")
+                
+                # Register tombstone: exclude this symbol from positions list for 90s
+                # so it doesn't re-appear while exchange is still processing the close
+                self._closed_external_symbols[symbol] = time.time() + 90.0
+                self._live_positions_cache = None
+                
+                return {"status": "success", "message": f"已成功平仓外部/手动仓位 {symbol}，平仓量为 {size}！"}
+            except Exception as close_e:
+                logger.error(f"[SniperEngine] Handled manual close of external position failed: {close_e}")
+                return {"status": "error", "message": f"平仓外部/手动仓位 {symbol} 失败：{close_e}。请直接前往交易所手动处理。"}
+
         trades = self.state.get("trades", [])
         trade = next((t for t in trades if t["id"] == trade_id), None)
         if not trade:
@@ -650,6 +862,11 @@ class SniperEngine:
         if not api_key or not secret:
             raise ValueError(f"未在系统中配置 {ex_id.upper()} 的实盘 API Key 或 Secret！请先前往设置补全。")
 
+        # Compare params to see if key/config changed. If not, reuse the cached instance.
+        params_key = (ex_id, api_key, secret, passphrase)
+        if getattr(self, '_exchange_instance', None) is not None and getattr(self, '_exchange_instance_params', None) == params_key:
+            return self._exchange_instance, ex_id
+
         import ccxt
         ex_class = getattr(ccxt, ex_id)
         params = {
@@ -670,6 +887,8 @@ class SniperEngine:
             pass
 
         exchange = ex_class(params)
+        self._exchange_instance = exchange
+        self._exchange_instance_params = params_key
         return exchange, ex_id
 
     def fetch_live_usdt_balance(self):
@@ -1077,7 +1296,7 @@ class SniperEngine:
             lev = t["leverage"]
 
             # Real Live Order Sync via CCXT
-            if t.get("is_live") and t.get("live_order_id"):
+            if t.get("is_live") and t.get("live_order_id") and t["status"] == "pending":
                 try:
                     exchange, ex_id = self._init_live_ccxt()
                     ccxt_symbol = f"{symbol}:USDT" if ":" not in symbol else symbol

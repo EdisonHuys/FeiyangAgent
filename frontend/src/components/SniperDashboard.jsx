@@ -8,6 +8,7 @@ export default function SniperDashboard({ apiBase }) {
   const [savingConfig, setSavingConfig] = useState(false);
   const [showConfigModal, setShowConfigModal] = useState(false);
   const [activeSubTab, setActiveSubTab] = useState('general'); // 'general' or 'exchange'
+  const [syncingPositions, setSyncingPositions] = useState(false);
 
   // Saved Config from backend
   const [formConfig, setFormConfig] = useState({
@@ -58,9 +59,17 @@ export default function SniperDashboard({ apiBase }) {
 
   useEffect(() => {
     fetchData();
-    const interval = setInterval(fetchData, 10000);
+    const interval = setInterval(fetchData, 5000);
     return () => clearInterval(interval);
   }, [apiBase]);
+
+  // Smart price formatter
+  const formatPrice = (val) => {
+    const n = parseFloat(val);
+    if (isNaN(n) || val === '-' || val === undefined || val === null) return '-';
+    if (n >= 1) return n.toFixed(2);
+    return n.toFixed(4);
+  };
 
   // Open modal with fresh copy of formConfig
   const handleOpenModal = () => {
@@ -275,6 +284,25 @@ export default function SniperDashboard({ apiBase }) {
     }
   };
 
+  const handleForceSyncExchange = async () => {
+    if (syncingPositions) return;
+    setSyncingPositions(true);
+    try {
+      const res = await fetch(`${apiBase}/api/sniper/sync-positions-force`, { method: 'POST' });
+      const data = await res.json();
+      if (data.status === 'success') {
+        alert(data.message);
+        fetchData();
+      } else {
+        alert(`同步异常：${data.message}`);
+      }
+    } catch (err) {
+      alert(`同步请求失败: ${err.message}`);
+    } finally {
+      setSyncingPositions(false);
+    }
+  };
+
   if (loading && !dashboardData) {
     return (
       <div className="loader-wrapper py-20">
@@ -453,7 +481,7 @@ export default function SniperDashboard({ apiBase }) {
             <Layers size={18} style={{ color: '#A855F7' }} />
           </div>
           <div className="sniper-card-val" style={{ color: '#A855F7', fontSize: '1.4rem', fontWeight: 800 }}>
-            {dashboardData?.active_positions_count || 0} <span style={{ fontSize: '0.85rem', color: 'var(--text-muted)', fontWeight: 400 }}>/ 最多 {formConfig.max_active_trades} 单</span>
+            {trades.filter(t => ['pending', 'filled', 'tp1_hit'].includes(t.status)).length} <span style={{ fontSize: '0.85rem', color: 'var(--text-muted)', fontWeight: 400 }}>/ 最多 {formConfig.max_active_trades} 单</span>
           </div>
           <div className="sniper-card-sub">
             平台及引擎: <strong style={{ color: 'var(--text-bright)' }}>{(formConfig.live_exchange || 'binance').toUpperCase()} ({mode.toUpperCase()})</strong>
@@ -502,7 +530,41 @@ export default function SniperDashboard({ apiBase }) {
                   🔥 实时活跃持仓看板 ({activePositions.length})
                 </h3>
               </div>
-              <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>10秒毫秒级实时价格监控与浮盈测算</span>
+              
+              <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+                {mode === 'live' && (
+                  <button
+                    onClick={handleForceSyncExchange}
+                    disabled={syncingPositions}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '0.4rem',
+                      padding: '4px 10px',
+                      borderRadius: '6px',
+                      background: 'rgba(16, 185, 129, 0.15)',
+                      border: '1px solid rgba(16, 185, 129, 0.3)',
+                      color: '#10B981',
+                      fontSize: '0.75rem',
+                      fontWeight: '600',
+                      cursor: 'pointer',
+                      transition: 'all 0.2s',
+                    }}
+                    onMouseEnter={(e) => {
+                      e.currentTarget.style.background = 'rgba(16, 185, 129, 0.25)';
+                      e.currentTarget.style.borderColor = '#10B981';
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.background = 'rgba(16, 185, 129, 0.15)';
+                      e.currentTarget.style.borderColor = 'rgba(16, 185, 129, 0.3)';
+                    }}
+                  >
+                    <RefreshCw size={12} className={syncingPositions ? 'spin' : ''} />
+                    {syncingPositions ? '正在拉取...' : '🔄 强拉交易所仓位'}
+                  </button>
+                )}
+                <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>10秒毫秒级实时价格监控与浮盈测算</span>
+              </div>
             </div>
 
             {activePositions.length === 0 ? (
@@ -546,23 +608,31 @@ export default function SniperDashboard({ apiBase }) {
                           </td>
 
                           <td>
-                            {t.status === 'filled' && <span className="badge-status filled">📈 持仓中 (埋伏成功)</span>}
-                            {t.status === 'tp1_hit' && <span className="badge-status tp1_hit">🎯 触及 TP1 (保本防御)</span>}
+                            {t.is_external ? (
+                              <span className="badge-status" style={{ background: 'rgba(79, 70, 229, 0.2)', color: '#a5b4fc', border: '1px solid rgba(79, 70, 229, 0.4)' }}>
+                                🔌 外部/手动持仓
+                              </span>
+                            ) : (
+                              <>
+                                {t.status === 'filled' && <span className="badge-status filled">📈 持仓中 (埋伏成功)</span>}
+                                {t.status === 'tp1_hit' && <span className="badge-status tp1_hit">🎯 触及 TP1 (保本防御)</span>}
+                              </>
+                            )}
                           </td>
 
                           <td>
                             <strong style={{ color: 'var(--color-wait)' }}>{t.leverage}x</strong>
-                            <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginLeft: '4px' }}>(${t.margin_usd})</span>
+                            <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginLeft: '4px' }}>(${formatPrice(t.margin_usd)})</span>
                           </td>
 
                           <td style={{ fontWeight: '600' }}>
-                            ${t.actual_entry || t.planned_entry}
+                          ${formatPrice(t.actual_entry || t.planned_entry)}
                           </td>
 
                           {/* Explicit Real-Time Price Column */}
                           <td>
                             <strong style={{ color: '#F59E0B', fontFamily: 'monospace', fontSize: '0.95rem' }}>
-                              ${t.current_price || '-'}
+                              ${formatPrice(t.current_price)}
                             </strong>
                           </td>
 
@@ -737,22 +807,22 @@ export default function SniperDashboard({ apiBase }) {
 
                         <td>
                           <strong style={{ color: 'var(--color-wait)' }}>{t.leverage}x</strong>
-                          <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginLeft: '4px' }}>(${t.margin_usd})</span>
+                          <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginLeft: '4px' }}>(${formatPrice(t.margin_usd)})</span>
                         </td>
 
                         <td>
-                          ${t.planned_entry}
-                          <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>区间: ${t.entry_min} - ${t.entry_max}</div>
+                          ${formatPrice(t.planned_entry)}
+                          <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>区间: ${formatPrice(t.entry_min)} - ${formatPrice(t.entry_max)}</div>
                         </td>
 
                         <td>
                           <span style={{ color: 'var(--text-muted)', fontFamily: 'monospace' }}>
-                            ${t.current_price || '-'}
+                            ${formatPrice(t.current_price)}
                           </span>
                         </td>
 
                         <td style={{ color: 'var(--color-short)', fontWeight: '600' }}>
-                          ${t.stop_loss}
+                          ${formatPrice(t.stop_loss)}
                         </td>
 
                         <td style={{ color: 'var(--color-long)' }}>
