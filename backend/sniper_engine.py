@@ -369,15 +369,33 @@ class SniperEngine:
                 symbol = t["symbol"]
                 ccxt_symbol = f"{symbol}:USDT" if ":" not in symbol else symbol
 
+                # 1. Cancel all existing trigger/stop orders on the exchange for this symbol to avoid duplication/pile-up
+                try:
+                    open_orders = exchange.fetch_open_orders(ccxt_symbol)
+                    for order in open_orders:
+                        o_id = order.get("id")
+                        o_type = str(order.get("type", "")).upper()
+                        # If it is a stop/trigger order (STOP_MARKET, etc.) or reduceOnly, cancel it
+                        if "STOP" in o_type or order.get("info", {}).get("reduceOnly") == "true" or order.get("info", {}).get("reduceOnly") is True:
+                            try:
+                                exchange.cancel_order(o_id, ccxt_symbol)
+                                logger.info(f"[TrailingStop] 成功清理交易所侧 {symbol} 的历史触发止损单 #{o_id}")
+                            except Exception as co_e:
+                                logger.warning(f"[TrailingStop] 清理历史触发单 #{o_id} 失败: {co_e}")
+                except Exception as fetch_e:
+                    logger.warning(f"[TrailingStop] 获取挂单清理失败: {fetch_e}")
+
+                # 2. Also try to cancel the stored protective SL order explicitly if it exists
                 old_order_id = t.get("protective_sl_order_id")
                 if old_order_id:
                     try:
                         exchange.cancel_order(old_order_id, ccxt_symbol)
-                        logger.info(f"[TrailingStop] 已撤销旧止损单 #{old_order_id}")
-                    except Exception as cancel_e:
-                        logger.warning(f"[TrailingStop] 撤销旧止损单失败，继续挂新单: {cancel_e}")
+                        logger.info(f"[TrailingStop] 已撤销记录止损单 #{old_order_id}")
+                    except Exception:
+                        pass
                     t["protective_sl_order_id"] = None
 
+                # 3. Place the new trailing SL order
                 new_order_id = self._place_live_protective_sl(exchange, ex_id, symbol, sig_type, amount, new_sl)
                 if new_order_id:
                     t["protective_sl_order_id"] = new_order_id
@@ -397,17 +415,39 @@ class SniperEngine:
 
     def _cancel_protective_sl(self, trade):
         """Cancel the exchange-side protective stop once the position is closed locally."""
-        order_id = trade.get("protective_sl_order_id")
-        if not trade.get("is_live") or not order_id:
+        if not trade.get("is_live"):
             return
         try:
             exchange, ex_id = self._init_live_ccxt()
             symbol = trade["symbol"]
             ccxt_symbol = f"{symbol}:USDT" if ":" not in symbol else symbol
-            exchange.cancel_order(order_id, ccxt_symbol)
-            logger.info(f"[LiveSniper] 保护性止损单 #{order_id} 已随本地平仓撤销 ({symbol})")
+            
+            # 1. Fetch and cancel all active trigger/stop orders on the exchange for this symbol
+            try:
+                open_orders = exchange.fetch_open_orders(ccxt_symbol)
+                for order in open_orders:
+                    o_id = order.get("id")
+                    o_type = str(order.get("type", "")).upper()
+                    # Cancel if it is a stop/trigger order (e.g. STOP_MARKET, STOP, etc.) or reduceOnly
+                    if "STOP" in o_type or order.get("info", {}).get("reduceOnly") == "true" or order.get("info", {}).get("reduceOnly") is True:
+                        try:
+                            exchange.cancel_order(o_id, ccxt_symbol)
+                            logger.info(f"[LiveSniper] 成功清理交易所侧 {symbol} 的遗留触发单 #{o_id}")
+                        except Exception as co_e:
+                            logger.warning(f"[LiveSniper] 清理遗留触发单 #{o_id} 失败: {co_e}")
+            except Exception as fetch_e:
+                logger.warning(f"[LiveSniper] 获取交易所挂单列表以清理遗留触发单失败: {fetch_e}")
+
+            # 2. Also try to cancel the stored order ID explicitly if it is still open
+            order_id = trade.get("protective_sl_order_id")
+            if order_id:
+                try:
+                    exchange.cancel_order(order_id, ccxt_symbol)
+                    logger.info(f"[LiveSniper] 保护性止损单 #{order_id} 已随本地平仓撤销 ({symbol})")
+                except Exception:
+                    pass
         except Exception as e:
-            logger.warning(f"[LiveSniper] 撤销保护性止损单失败 ({trade.get('symbol')}): {e}")
+            logger.warning(f"[LiveSniper] 撤销保护性止损处理出现异常 ({trade.get('symbol')}): {e}")
         finally:
             trade["protective_sl_order_id"] = None
 
