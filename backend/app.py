@@ -706,7 +706,8 @@ def run_analysis(req: AnalysisRequest):
         model_name=model_name,
         temperature=temperature,
         max_tokens=max_tokens,
-        system_prompt=load_system_prompt(root_dir)
+        system_prompt=load_system_prompt(root_dir),
+        root_dir=root_dir
     )
 
     # 3. Call LLM (with dual-call consensus if enabled)
@@ -1276,7 +1277,8 @@ def start_background_monitor():
                                 model_name=model_name,
                                 temperature=temperature,
                                 max_tokens=max_tokens,
-                                system_prompt=load_system_prompt(root_dir)
+                                system_prompt=load_system_prompt(root_dir),
+                                root_dir=root_dir
                             )
                             # Dual-call consensus: only trade when LLM agrees with itself
                             consensus_on = yaml_cfg.get("llm", {}).get("consensus_enabled", True)

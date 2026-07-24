@@ -129,7 +129,8 @@ def run_pipeline(config, dry_run=False, symbol_override=None):
         api_base=api_base,
         model_name=model_name,
         temperature=temperature,
-        max_tokens=max_tokens
+        max_tokens=max_tokens,
+        root_dir=os.getcwd()
     )
     
     try:

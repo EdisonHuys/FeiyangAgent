@@ -5,6 +5,7 @@ import SettingsPanel from './components/SettingsPanel';
 import SniperDashboard from './components/SniperDashboard';
 import BacktestPanel from './components/BacktestPanel';
 import PromptEditorPanel from './components/PromptEditorPanel';
+import SentimentPanel from './components/SentimentPanel';
 
 const API_BASE = window.location.origin.includes('5173') ? 'http://127.0.0.1:8000' : window.location.origin;
 
@@ -495,6 +496,9 @@ export default function App() {
                   )}
                 </button>
               </div>
+
+              {/* Market Sentiment Panel */}
+              <SentimentPanel apiBase={API_BASE} />
 
               {/* Diagnostic outputs */}
               <div className="panel" style={{ flex: 1, minHeight: '350px', overflow: 'hidden' }}>

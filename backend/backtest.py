@@ -153,6 +153,7 @@ class BacktestRunner:
             temperature=llm_cfg.get("temperature", 0.1),
             max_tokens=llm_cfg.get("max_tokens", 3000),
             system_prompt=load_system_prompt(self.root_dir),
+            root_dir=self.root_dir,
         )
         return agent.analyze
 

@@ -31,7 +31,7 @@ def load_system_prompt(root_dir=None):
 
 
 class FeiyangAgent:
-    def __init__(self, api_key, api_base, model_name="gpt-4o", temperature=0.1, max_tokens=4096, system_prompt=None):
+    def __init__(self, api_key, api_base, model_name="gpt-4o", temperature=0.1, max_tokens=4096, system_prompt=None, root_dir=None):
         """
         Initialize the LLM Agent client.
         system_prompt: optional custom override; falls back to DEFAULT_SYSTEM_PROMPT.
@@ -44,6 +44,7 @@ class FeiyangAgent:
         self.temperature = temperature
         self.max_tokens = max_tokens
         self._system_prompt = system_prompt
+        self.root_dir = root_dir
         logger.info(f"FeiyangAgent initialized with model: {model_name}, endpoint: {api_base}")
 
     DEFAULT_SYSTEM_PROMPT = """你是一个精通加密货币量化与技术面分析的顶级AI交易智能体，扮演资深分析师"飞扬"的角色。你的唯一目标是：在严格风控下，输出高胜率、高盈亏比的精准交易信号。
@@ -257,6 +258,23 @@ class FeiyangAgent:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_message}
         ]
+
+        if self.root_dir:
+            try:
+                debug_path = os.path.join(self.root_dir, "last_llm_request.json")
+                debug_data = {
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "model": self.model_name,
+                    "temperature": self.temperature,
+                    "system_prompt": system_prompt,
+                    "user_message": user_message,
+                    "payload": payload
+                }
+                with open(debug_path, "w", encoding="utf-8") as f:
+                    json.dump(debug_data, f, indent=2, ensure_ascii=False)
+                logger.info(f"Successfully saved last LLM request debug info to {debug_path}")
+            except Exception as e:
+                logger.warning(f"Failed to save last LLM request debug info: {e}")
 
         last_parse_error = None
         content = ""  # Pre-initialize to avoid fragile dir() check in retry

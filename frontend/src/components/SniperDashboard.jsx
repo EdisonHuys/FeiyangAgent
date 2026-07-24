@@ -10,7 +10,7 @@ export default function SniperDashboard({ apiBase }) {
   const [showConfigModal, setShowConfigModal] = useState(false);
   const [activeSubTab, setActiveSubTab] = useState('general'); // 'general' or 'exchange'
   const [syncingPositions, setSyncingPositions] = useState(false);
-  const [historyFilter, setHistoryFilter] = useState('all'); // 'all', 'pending', 'closed_tp', 'closed_sl', 'cancelled'
+  const [historyFilter, setHistoryFilter] = useState('pending'); // 'all', 'pending', 'closed_tp', 'closed_sl', 'cancelled'
 
   // Saved Config from backend
   const [formConfig, setFormConfig] = useState({
@@ -432,9 +432,6 @@ export default function SniperDashboard({ apiBase }) {
         </div>
       )}
 
-      {/* 1c. Market Sentiment Panel */}
-      <SentimentPanel apiBase={apiBase} />
-
       {/* 2. Key Telemetry Metric Cards */}
       <div className="sniper-grid">
         {/* Win Rate */}
@@ -641,18 +638,50 @@ export default function SniperDashboard({ apiBase }) {
                             </strong>
                           </td>
 
-                          <td style={{ color: 'var(--color-short)', fontWeight: '600' }}>
-                            ${formatPrice(t.stop_loss)}
-                            {t.tp1_partial_closed && (
-                              <span style={{ fontSize: '0.65rem', background: 'rgba(0,230,118,0.15)', color: 'var(--color-long)', padding: '1px 4px', borderRadius: '3px', marginLeft: '4px' }}>
-                                已锁保本位
-                              </span>
-                            )}
-                            {t.trailing_sl_level > 0 && (
-                              <span style={{ fontSize: '0.62rem', background: 'rgba(251,191,36,0.15)', color: '#FCD34D', padding: '1px 4px', borderRadius: '3px', marginLeft: '4px', display: 'block', marginTop: '2px' }}>
-                                🔒 锁利 {t.locked_pnl_percent !== undefined ? t.locked_pnl_percent : Math.round(t.trailing_sl_level * 0.5)}% (峰值 {Math.round(t.trailing_sl_level)}%)
-                              </span>
-                            )}
+                          <td style={{ fontWeight: '600' }}>
+                            {(() => {
+                              const entry = t.actual_entry || t.planned_entry;
+                              const slVal = parseFloat(t.stop_loss);
+                              const entryVal = parseFloat(entry);
+                              const isLong = t.signal_type.toLowerCase() === 'long';
+                              
+                              let isProfitableSL = false;
+                              if (!isNaN(slVal) && !isNaN(entryVal)) {
+                                isProfitableSL = isLong ? (slVal > entryVal) : (slVal < entryVal);
+                              }
+                              
+                              return (
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                                  <span style={{ color: isProfitableSL ? 'var(--color-long)' : 'var(--color-short)' }}>
+                                    ${formatPrice(t.stop_loss)}
+                                  </span>
+                                  
+                                  {t.initial_stop_loss && formatPrice(t.initial_stop_loss) !== formatPrice(t.stop_loss) && (
+                                    <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)', fontWeight: 'normal' }} title="初始防守止损线">
+                                      (初始: ${formatPrice(t.initial_stop_loss)})
+                                    </span>
+                                  )}
+                                  
+                                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: '3px', marginTop: '2px' }}>
+                                    {isProfitableSL && (
+                                      <span style={{ fontSize: '0.62rem', background: 'rgba(16, 185, 129, 0.15)', color: 'var(--color-long)', padding: '1px 4px', borderRadius: '3px' }}>
+                                        🛡️ 动态保利中
+                                      </span>
+                                    )}
+                                    {t.tp1_partial_closed && (
+                                      <span style={{ fontSize: '0.62rem', background: 'rgba(16, 185, 129, 0.15)', color: 'var(--color-long)', padding: '1px 4px', borderRadius: '3px' }}>
+                                        已锁保本位
+                                      </span>
+                                    )}
+                                    {t.trailing_sl_level > 0 && (
+                                      <span style={{ fontSize: '0.62rem', background: 'rgba(251,191,36,0.15)', color: '#FCD34D', padding: '1px 4px', borderRadius: '3px' }} title={`历史最高浮盈达到 ${Math.round(t.trailing_sl_level)}%`}>
+                                        🔒 锁利 {t.locked_pnl_percent !== undefined ? t.locked_pnl_percent : Math.round(t.trailing_sl_level * 0.5)}%
+                                      </span>
+                                    )}
+                                  </div>
+                                </div>
+                              );
+                            })()}
                           </td>
 
                           <td style={{ color: 'var(--color-long)' }}>
