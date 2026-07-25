@@ -293,12 +293,12 @@ def build_market_context(symbols: List[str] = None, exchange_id: str = "binance"
         context["fear_greed"] = fng
 
     # 2. Funding Rates
-    rates = fetch_funding_rates(symbols[:4], exchange_id)  # Limit to 4 to avoid rate limits
+    rates = fetch_funding_rates(symbols, exchange_id)  # Fetch for all monitored symbols
     if rates:
         context["funding_rates"] = rates
 
     # 3. Macro Event Proximity
-    macro = check_macro_event_proximity(hours_window=12)
+    macro = check_macro_event_proximity(hours_window=24)
     if macro:
         context["macro_event"] = macro
 
