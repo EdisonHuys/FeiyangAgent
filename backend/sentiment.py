@@ -194,57 +194,71 @@ def check_macro_event_proximity(hours_window: int = 12) -> Optional[Dict]:
 
 def fetch_crypto_news(max_items: int = 5) -> Optional[List[Dict]]:
     """
-    Fetch recent crypto news headlines from CryptoPanic (free tier).
-    Falls back to CoinGecko status updates if CryptoPanic is unavailable.
-    Returns: [{"title": "...", "source": "...", "published": "...", "sentiment": "bullish/bearish/neutral"}]
+    Fetch recent crypto news headlines from CoinTelegraph and CoinDesk RSS feeds.
+    Returns: [{"title": "...", "source": "...", "published": "...", "currencies": []}]
     """
     cached = _cache_get("crypto_news")
     if cached:
         return cached
 
-    # Try CryptoPanic free API (no key needed for basic access)
-    try:
-        import urllib.request
-        url = "https://cryptopanic.com/api/free/v1/posts/?auth_token=free&public=true&kind=news"
-        req = urllib.request.Request(url, headers={"User-Agent": "FeiyangAgent/1.0"})
-        with urllib.request.urlopen(req, timeout=8) as resp:
-            data = json.loads(resp.read().decode())
+    news = []
+    
+    # List of RSS feeds to try
+    feeds = [
+        {"url": "https://cointelegraph.com/rss", "source": "CoinTelegraph"},
+        {"url": "https://www.coindesk.com/arc/outboundfeeds/rss/", "source": "CoinDesk"}
+    ]
 
-        if data.get("results"):
-            news = []
-            for item in data["results"][:max_items]:
-                news.append({
-                    "title": item.get("title", "")[:120],
-                    "source": item.get("source", {}).get("title", "unknown"),
-                    "published": item.get("published_at", "")[:16],
-                    "currencies": [c.get("code", "") for c in item.get("currencies", [])[:3]]
-                })
-            _cache_set("crypto_news", news)
-            return news
-    except Exception as e:
-        logger.debug(f"[Sentiment] CryptoPanic fetch failed: {e}")
+    for feed in feeds:
+        try:
+            import urllib.request
+            import xml.etree.ElementTree as ET
+            from email.utils import parsedate_to_datetime
 
-    # Fallback: try alternative.me news
-    try:
-        import urllib.request
-        url = "https://min-api.cryptocompare.com/data/v2/news/?lang=EN&categories=BTC,ETH,regulation"
-        req = urllib.request.Request(url, headers={"User-Agent": "FeiyangAgent/1.0"})
-        with urllib.request.urlopen(req, timeout=8) as resp:
-            data = json.loads(resp.read().decode())
+            url = feed["url"]
+            req = urllib.request.Request(
+                url, 
+                headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
+            )
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                xml_data = resp.read()
+                root = ET.fromstring(xml_data)
+                items = root.findall('.//item')
+                
+                for item in items:
+                    title_elem = item.find('title')
+                    pub_elem = item.find('pubDate')
+                    
+                    if title_elem is not None:
+                        title = title_elem.text.strip()
+                        
+                        # Format the publish time
+                        published_str = ""
+                        if pub_elem is not None and pub_elem.text:
+                            try:
+                                dt = parsedate_to_datetime(pub_elem.text)
+                                published_str = dt.strftime("%Y-%m-%d %H:%M")
+                            except Exception:
+                                published_str = pub_elem.text[:16]
+                                
+                        news.append({
+                            "title": title[:120],
+                            "source": feed["source"],
+                            "published": published_str,
+                            "currencies": []
+                        })
+                        
+                        if len(news) >= max_items:
+                            break
+            
+            if len(news) >= max_items:
+                break
+        except Exception as e:
+            logger.debug(f"[Sentiment] RSS fetch failed for {feed['source']}: {e}")
 
-        if data.get("Data"):
-            news = []
-            for item in data["Data"][:max_items]:
-                news.append({
-                    "title": item.get("title", "")[:120],
-                    "source": item.get("source", "unknown"),
-                    "published": datetime.fromtimestamp(item.get("published_on", 0)).strftime("%Y-%m-%d %H:%M"),
-                    "currencies": []
-                })
-            _cache_set("crypto_news", news)
-            return news
-    except Exception as e:
-        logger.debug(f"[Sentiment] CryptoCompare news fallback failed: {e}")
+    if news:
+        _cache_set("crypto_news", news)
+        return news
 
     return None
 
