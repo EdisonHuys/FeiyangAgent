@@ -38,8 +38,7 @@ except ImportError:
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("FeiyangBackend")
 
-# Load environment variables
-load_dotenv()
+# Load environment variables (will load using absolute ENV_PATH after it is defined below)
 
 app = FastAPI(title="Feiyang Agent API")
 
@@ -99,6 +98,9 @@ CONFIG_PATH = os.path.join(root_dir, "config.yaml")
 ENV_PATH = os.path.join(root_dir, ".env")
 STATE_FILE_PATH = os.path.join(root_dir, "last_signals.json")
 PROMPT_PATH = os.path.join(root_dir, "feiyang_prompt.txt")
+
+# Load environment variables using absolute ENV_PATH to support WKWebView context and frozen execution CWD changes
+load_dotenv(ENV_PATH)
 
 sniper_engine = SniperEngine(root_dir)
 backtest_runner = BacktestRunner(root_dir)
@@ -440,7 +442,7 @@ def get_config():
     yaml_cfg = load_yaml_config()
     
     # Read secret keys from environment/dotenv
-    load_dotenv(override=True)
+    load_dotenv(ENV_PATH, override=True)
     return {
         "symbol": yaml_cfg.get("symbol", "BTC/USDT"),
         "exchange": yaml_cfg.get("exchange", "binance"),
@@ -728,7 +730,7 @@ def run_analysis(req: AnalysisRequest):
     payload = market_data["payload"]
     
     # 2. Setup Agent
-    load_dotenv(override=True)
+    load_dotenv(ENV_PATH, override=True)
     api_key = os.getenv("OPENAI_API_KEY")
     api_base = os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1")
     
@@ -1261,7 +1263,7 @@ def start_background_monitor():
                 temperature = llm_cfg.get("temperature", 0.1)
                 max_tokens = llm_cfg.get("max_tokens", 3000)
                 
-                load_dotenv(override=True)
+                load_dotenv(ENV_PATH, override=True)
                 api_key = os.getenv("OPENAI_API_KEY")
                 api_base = os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1")
                 

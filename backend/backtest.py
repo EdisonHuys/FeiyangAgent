@@ -140,7 +140,7 @@ class BacktestRunner:
                 return {}
 
     def _build_default_analyzer(self, yaml_cfg):
-        load_dotenv(override=True)
+        load_dotenv(os.path.join(self.root_dir, ".env"), override=True)
         api_key = os.getenv("OPENAI_API_KEY")
         api_base = os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1")
         if not api_key:
