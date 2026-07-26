@@ -38,35 +38,35 @@ export default function KLineChart({ data }) {
     const chart = createChart(chartContainerRef.current, {
       layout: {
         background: { color: 'transparent' },
-        textColor: '#86868b',
+        textColor: '#94a3b8',
         fontSize: 11,
       },
       grid: {
-        vertLines: { color: 'rgba(0, 0, 0, 0.05)' },
-        horzLines: { color: 'rgba(0, 0, 0, 0.05)' },
+        vertLines: { color: 'rgba(255, 255, 255, 0.04)' },
+        horzLines: { color: 'rgba(255, 255, 255, 0.04)' },
       },
       crosshair: {
         mode: 1, // Magnet
         vertLine: {
-          color: 'rgba(0, 122, 255, 0.4)',
+          color: 'rgba(245, 158, 11, 0.4)',
           width: 1,
           style: 1,
-          labelBackgroundColor: '#ffffff',
+          labelBackgroundColor: '#1e1b4b',
         },
         horzLine: {
-          color: 'rgba(0, 122, 255, 0.4)',
+          color: 'rgba(245, 158, 11, 0.4)',
           width: 1,
           style: 1,
-          labelBackgroundColor: '#ffffff',
+          labelBackgroundColor: '#1e1b4b',
         },
       },
       timeScale: {
-        borderColor: 'rgba(0, 0, 0, 0.08)',
+        borderColor: 'rgba(255, 255, 255, 0.08)',
         timeVisible: true,
         secondsVisible: false,
       },
       rightPriceScale: {
-        borderColor: 'rgba(0, 0, 0, 0.08)',
+        borderColor: 'rgba(255, 255, 255, 0.08)',
       },
       width: initialWidth,
       height: 400,
@@ -76,11 +76,11 @@ export default function KLineChart({ data }) {
 
     // 3. Add Candlestick Series (Using v5 addSeries API)
     const candlestickSeries = chart.addSeries(CandlestickSeries, {
-      upColor: '#34c759',
-      downColor: '#ff3b30',
+      upColor: '#10b981',
+      downColor: '#f43f5e',
       borderVisible: false,
-      wickUpColor: '#34c759',
-      wickDownColor: '#ff3b30',
+      wickUpColor: '#10b981',
+      wickDownColor: '#f43f5e',
     });
 
     // 4. Add Volume Series (Using v5 addSeries API)
@@ -119,7 +119,7 @@ export default function KLineChart({ data }) {
     const volumeData = cleanData.map(d => ({
       time: d.time,
       value: d.volume,
-      color: d.close >= d.open ? 'rgba(52, 199, 89, 0.2)' : 'rgba(255, 59, 48, 0.2)',
+      color: d.close >= d.open ? 'rgba(16, 185, 129, 0.22)' : 'rgba(244, 63, 94, 0.22)',
     }));
 
     // Indicators (Filter out null values)

@@ -5,57 +5,52 @@
    ═══════════════════════════════════════════════════════ */
 
 :root {
-  /* ─── macOS 26 Light Glass ─── */
-  --glass-bg: rgba(255, 255, 255, 0.78);
-  --glass-bg-elevated: rgba(255, 255, 255, 0.88);
-  --glass-bg-hover: rgba(255, 255, 255, 0.92);
-  --glass-border: rgba(0, 0, 0, 0.1);
-  --glass-border-strong: rgba(0, 0, 0, 0.15);
-  --glass-highlight: rgba(255, 255, 255, 0.95);
-  --glass-shadow: 0 2px 16px rgba(0, 0, 0, 0.06), 0 1px 3px rgba(0, 0, 0, 0.04);
-  --glass-shadow-elevated: 0 8px 32px rgba(0, 0, 0, 0.1), 0 2px 8px rgba(0, 0, 0, 0.06);
+  /* ─── macOS 27 Golden Gate Liquid Glass (Dark Sunset Theme) ─── */
+  --glass-bg: rgba(12, 14, 26, 0.42);
+  --glass-bg-elevated: rgba(22, 25, 45, 0.65);
+  --glass-bg-hover: rgba(32, 36, 62, 0.75);
+  --glass-border: rgba(255, 215, 0, 0.08);
+  --glass-border-strong: rgba(255, 215, 0, 0.15);
+  --glass-highlight: rgba(255, 215, 0, 0.18);
+  --glass-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
+  --glass-shadow-elevated: 0 16px 48px rgba(0, 0, 0, 0.65);
   --glass-blur: 40px;
-  --glass-saturation: 180%;
+  --glass-saturation: 210%;
 
-  /* ─── Background (macOS Tahoe wallpaper feel) ─── */
-  --bg-main: #f0f2f8;
-  --bg-gradient: linear-gradient(
-    160deg,
-    #e8ecf8 0%,
-    #f2f0fa 25%,
-    #eef4f8 50%,
-    #f5f0f8 75%,
-    #f0f4f2 100%
-  );
+  /* ─── Liquid Animated Background ─── */
+  --bg-main: #06070a;
+  --bg-gradient: radial-gradient(at 0% 0%, #1e1b4b 0, transparent 55%),
+                    radial-gradient(at 50% 0%, #1c0e2c 0, transparent 55%),
+                    radial-gradient(at 100% 0%, #2e102f 0, transparent 55%);
 
-  /* ─── Text (Apple system colors) ─── */
-  --text-main: #1d1d1f;
-  --text-secondary: #424245;
-  --text-muted: #86868b;
-  --text-bright: #000000;
+  /* ─── Text (High Contrast macOS Dark style) ─── */
+  --text-main: #f8fafc;
+  --text-secondary: #cbd5e1;
+  --text-muted: #64748b;
+  --text-bright: #ffffff;
 
-  /* ─── Accent Colors (Apple system) ─── */
-  --color-accent: #007aff;
-  --color-accent-soft: rgba(0, 122, 255, 0.1);
-  --color-long: #34c759;
-  --color-long-soft: rgba(52, 199, 89, 0.1);
-  --color-short: #ff3b30;
-  --color-short-soft: rgba(255, 59, 48, 0.1);
-  --color-wait: #007aff;
-  --color-wait-soft: rgba(0, 122, 255, 0.1);
-  --color-warning: #ff9500;
-  --color-warning-soft: rgba(255, 149, 0, 0.1);
-  --color-purple: #af52de;
-  --color-purple-soft: rgba(175, 82, 222, 0.1);
-  --color-teal: #5ac8fa;
-  --color-teal-soft: rgba(90, 200, 250, 0.1);
+  /* ─── Accent Colors (Golden Gate / Gold Sunset Gradient) ─── */
+  --color-accent: #f59e0b;
+  --color-accent-soft: rgba(245, 158, 11, 0.12);
+  --color-long: #10b981;
+  --color-long-soft: rgba(16, 185, 129, 0.12);
+  --color-short: #f43f5e;
+  --color-short-soft: rgba(244, 63, 94, 0.12);
+  --color-wait: #f59e0b;
+  --color-wait-soft: rgba(245, 158, 11, 0.12);
+  --color-warning: #f59e0b;
+  --color-warning-soft: rgba(245, 158, 11, 0.12);
+  --color-purple: #c084fc;
+  --color-purple-soft: rgba(192, 132, 252, 0.12);
+  --color-teal: #38bdf8;
+  --color-teal-soft: rgba(56, 189, 248, 0.12);
 
   /* ─── Chart Lines ─── */
-  --line-ma5: #ff9500;
-  --line-ma10: #007aff;
-  --line-ma30: #af52de;
-  --line-ema55: #ff3b30;
-  --line-bb: rgba(142, 142, 147, 0.5);
+  --line-ma5: #f59e0b;
+  --line-ma10: #38bdf8;
+  --line-ma30: #c084fc;
+  --line-ema55: #f43f5e;
+  --line-bb: rgba(148, 163, 184, 0.35);
 
   /* ─── Radii ─── */
   --radius-sm: 10px;
@@ -72,7 +67,7 @@
   --space-xl: 2rem;
 
   font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'SF Pro Text', 'Inter', 'Segoe UI', sans-serif;
-  color-scheme: light;
+  color-scheme: dark;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
@@ -92,13 +87,88 @@ body {
   overflow-x: hidden;
   font-size: 14px;
   line-height: 1.5;
+  position: relative;
 }
+
+/* ─── Animated Liquid Background blobs ─── */
+.liquid-bg {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 0;
+  overflow: hidden;
+  background: var(--bg-main);
+  background-image: var(--bg-gradient);
+  pointer-events: none;
+}
+
+.blob {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(120px);
+  opacity: 0.16;
+  mix-blend-mode: screen;
+  animation: drift 20s infinite alternate ease-in-out;
+}
+
+.blob-gold {
+  width: 500px;
+  height: 500px;
+  background: radial-gradient(circle, #f59e0b, #d97706);
+  top: -100px;
+  left: 25%;
+  animation-duration: 26s;
+}
+
+.blob-orange {
+  width: 600px;
+  height: 600px;
+  background: radial-gradient(circle, #ff5722, #ea580c);
+  bottom: -200px;
+  right: 15%;
+  animation-duration: 32s;
+  animation-delay: -6s;
+}
+
+.blob-indigo {
+  width: 450px;
+  height: 450px;
+  background: radial-gradient(circle, #6366f1, #4f46e5);
+  top: 35%;
+  left: -120px;
+  animation-duration: 24s;
+  animation-delay: -12s;
+}
+
+.blob-purple {
+  width: 550px;
+  height: 550px;
+  background: radial-gradient(circle, #a855f7, #7c3aed);
+  bottom: 25%;
+  right: -120px;
+  animation-duration: 29s;
+  animation-delay: -18s;
+}
+
+@keyframes drift {
+  0% {
+    transform: translate(0, 0) scale(1) rotate(0deg);
+  }
+  100% {
+    transform: translate(90px, 60px) scale(1.18) rotate(360deg);
+  }
+}
+
 
 /* ─── App Container ─── */
 .app-container {
   display: flex;
   flex-direction: column;
   height: 100vh;
+  position: relative;
+  z-index: 10;
 }
 
 /* ═══════════════════════════════════════════════════════
@@ -181,37 +251,38 @@ body {
 }
 
 .btn-primary {
-  background: var(--color-accent);
+  background: linear-gradient(135deg, #f59e0b 0%, #ea580c 100%);
   color: #ffffff;
-  border-color: transparent;
-  box-shadow: 0 2px 8px rgba(0, 122, 255, 0.25);
+  border-color: rgba(255, 255, 255, 0.1);
+  box-shadow: 0 4px 12px rgba(234, 88, 12, 0.25);
 }
 
 .btn-primary:hover:not(:disabled) {
-  background: #0066d6;
-  transform: scale(1.02);
-  box-shadow: 0 4px 16px rgba(0, 122, 255, 0.3);
+  background: linear-gradient(135deg, #fbbf24 0%, #f97316 100%);
+  transform: translateY(-1px);
+  box-shadow: 0 6px 20px rgba(234, 88, 12, 0.4);
 }
 
 .btn-secondary {
-  background: rgba(255, 255, 255, 0.7);
-  border-color: var(--glass-border);
-  color: var(--text-main);
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(255, 255, 255, 0.1);
+  color: var(--text-secondary);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.04);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.15);
 }
 
 .btn-secondary:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.9);
-  border-color: var(--glass-border-strong);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+  background: rgba(255, 255, 255, 0.12);
+  border-color: rgba(255, 255, 255, 0.2);
+  color: var(--text-main);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
 }
 
 .btn-secondary.active {
-  background: var(--color-accent-soft);
-  border-color: rgba(0, 122, 255, 0.3);
-  color: var(--color-accent);
+  background: rgba(245, 158, 11, 0.15);
+  border-color: rgba(245, 158, 11, 0.35);
+  color: #f59e0b;
   font-weight: 600;
 }
 
@@ -503,21 +574,21 @@ body {
 
 .form-control {
   width: 100%;
-  background: rgba(255, 255, 255, 0.7);
-  border: 1px solid rgba(0, 0, 0, 0.1);
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: var(--radius-sm);
   padding: 0.6rem 0.85rem;
   color: var(--text-main);
   font-size: 0.85rem;
   transition: all 0.2s ease;
-  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.04);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.2);
 }
 
 .form-control:focus {
   outline: none;
   border-color: var(--color-accent);
-  background: #ffffff;
-  box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.12), inset 0 1px 2px rgba(0, 0, 0, 0.02);
+  background: rgba(255, 255, 255, 0.12);
+  box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.18), inset 0 1px 2px rgba(0, 0, 0, 0.1);
 }
 
 .form-control::placeholder {
@@ -526,7 +597,7 @@ body {
 
 select.form-control {
   appearance: none;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%2386868b' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23cbd5e1' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
   background-repeat: no-repeat;
   background-position: right 0.75rem center;
   padding-right: 2rem;

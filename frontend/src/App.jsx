@@ -272,6 +272,14 @@ export default function App() {
 
   return (
     <div className="app-container">
+      {/* Liquid animated glass blobs background */}
+      <div className="liquid-bg">
+        <div className="blob blob-gold"></div>
+        <div className="blob blob-orange"></div>
+        <div className="blob blob-indigo"></div>
+        <div className="blob blob-purple"></div>
+      </div>
+
       {/* Navbar */}
       <header className="navbar">
         <div className="brand-section">
