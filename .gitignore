@@ -56,3 +56,6 @@ Thumbs.db
 *.sqlite
 *.sqlite3
 *.db
+
+# Workbuddy Agent Cache
+.workbuddy/
