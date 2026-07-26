@@ -937,14 +937,25 @@ class SniperEngine:
         self._live_positions_cache = None
         if str(trade_id).startswith("external-"):
             # This is an external/manual position from the exchange
-            symbol = str(trade_id).replace("external-", "")
+            # trade_id format: "external-{symbol}-{side}"
+            parts = str(trade_id).replace("external-", "").split("-")
+            if len(parts) >= 2:
+                side = parts[-1].lower()
+                symbol = "-".join(parts[:-1])
+            else:
+                symbol = parts[0]
+                side = None
+
             try:
                 # Initialize CCXT exchange client
                 exchange, ex_id = self._init_live_ccxt()
                 
                 # Fetch positions to find exact size and side
                 real_positions = self._fetch_live_positions()
-                match_pos = next((pos for pos in real_positions if pos["symbol"] == symbol), None)
+                if side:
+                    match_pos = next((pos for pos in real_positions if pos["symbol"] == symbol and pos["side"] == side), None)
+                else:
+                    match_pos = next((pos for pos in real_positions if pos["symbol"] == symbol), None)
                 if not match_pos:
                     return {"status": "error", "message": f"未在交易所找到 {symbol} 的真实仓位，可能已被平仓或过期。"}
                 
