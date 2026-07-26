@@ -39,7 +39,12 @@ class FeiyangAgent:
         if not api_key:
             raise ValueError("LLM API key is required. Please set it in your .env file.")
 
-        self.client = OpenAI(api_key=api_key, base_url=api_base)
+        import httpx
+        if "localhost" in api_base or "127.0.0.1" in api_base:
+            http_client = httpx.Client(proxy=None)
+            self.client = OpenAI(api_key=api_key, base_url=api_base, http_client=http_client)
+        else:
+            self.client = OpenAI(api_key=api_key, base_url=api_base)
         self.model_name = model_name
         self.temperature = temperature
         self.max_tokens = max_tokens
@@ -181,18 +186,18 @@ class FeiyangAgent:
 
 ```json
 {
-  "symbol": "BTC/USDT",
+  "symbol": "<symbol name (e.g. BTC/USDT)>",
   "timestamp": "YYYY-MM-DD HH:MM:SS",
-  "signal_type": "long",
+  "signal_type": "<long/short/wait>",
   "confidence_score": 8,
-  "market_regime": "trending_up",
+  "market_regime": "<trending_up/trending_down/ranging/volatile>",
   "entry_zone": {
-    "min": 62500.00,
-    "max": 63000.00
+    "min": <min entry price (float value calculated from actual data)>,
+    "max": <max entry price (float value calculated from actual data)>
   },
   "entry_type": "limit",
-  "take_profit_targets": [64500.00, 66000.00],
-  "stop_loss": 61500.00,
+  "take_profit_targets": [<TP1 price (float value)>, <TP2 price (float value)>],
+  "stop_loss": <stop loss price (float value calculated from actual data)>,
   "risk_reward_ratio": 2.3,
   "confluence_factors": ["Fib_0.618_support", "4H_EMA55", "RSI_divergence"],
   "core_reason": "4H回踩EMA55叠加Fib0.618强支撑，RSI底背离确认，R:R=2.3"
@@ -308,11 +313,17 @@ class FeiyangAgent:
         content = ""  # Pre-initialize to avoid fragile dir() check in retry
         for attempt in range(2):
             try:
+                extra_args = {}
+                base_url_str = str(self.client.base_url)
+                if "localhost" in base_url_str or "127.0.0.1" in base_url_str:
+                    extra_args["extra_body"] = {"options": {"num_ctx": 16384}}
+
                 response = self.client.chat.completions.create(
                     model=self.model_name,
                     messages=messages,
                     temperature=self.temperature,
-                    max_tokens=self.max_tokens
+                    max_tokens=self.max_tokens,
+                    **extra_args
                 )
 
                 content = response.choices[0].message.content

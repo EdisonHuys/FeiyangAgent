@@ -807,7 +807,12 @@ def test_llm_connection(req: LLMTestRequest):
         
     try:
         start_time = time.time()
-        client = OpenAI(api_key=api_key, base_url=api_base)
+        import httpx
+        if "localhost" in api_base or "127.0.0.1" in api_base:
+            http_client = httpx.Client(proxy=None)
+            client = OpenAI(api_key=api_key, base_url=api_base, http_client=http_client)
+        else:
+            client = OpenAI(api_key=api_key, base_url=api_base)
         
         # Test connection with a lightweight prompt
         response = client.chat.completions.create(

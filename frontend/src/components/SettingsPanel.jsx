@@ -40,6 +40,14 @@ export default function SettingsPanel({ apiBase }) {
         return res.json();
       })
       .then(data => {
+        const base = data.openai_api_base || '';
+        const key = data.openai_api_key || '';
+        if (key && key !== 'ollama' && !base.includes('localhost') && !base.includes('127.0.0.1')) {
+          localStorage.setItem('feiyang_cloud_api_key', key);
+          localStorage.setItem('feiyang_cloud_api_base', base);
+          localStorage.setItem('feiyang_cloud_model', data.llm_model || 'deepseek-v4-flash');
+        }
+
         try {
           const draft = localStorage.getItem('feiyang_settings_draft');
           if (draft) {
@@ -364,6 +372,63 @@ export default function SettingsPanel({ apiBase }) {
               <option value={30}>30 分钟 (标准短线)</option>
               <option value={60}>60 分钟 (1小时慢速)</option>
             </select>
+          </div>
+
+          <div className="form-group" style={{ marginBottom: '1.25rem' }}>
+            <label className="form-label">🚀 快速切换通道预设 (LLM Presets)</label>
+            <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.25rem' }}>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                style={{
+                  flex: 1,
+                  padding: '0.5rem',
+                  fontSize: '0.85rem',
+                  background: config.openai_api_base.includes('localhost') || config.openai_api_base.includes('127.0.0.1') ? 'rgba(255,255,255,0.05)' : 'rgba(16, 185, 129, 0.1)',
+                  borderColor: config.openai_api_base.includes('localhost') || config.openai_api_base.includes('127.0.0.1') ? 'rgba(255,255,255,0.1)' : 'rgb(16, 185, 129)',
+                  color: config.openai_api_base.includes('localhost') || config.openai_api_base.includes('127.0.0.1') ? 'var(--text-muted)' : 'rgb(16, 185, 129)',
+                  borderWidth: '1px',
+                  borderStyle: 'solid',
+                  cursor: 'pointer'
+                }}
+                onClick={() => {
+                  const savedKey = localStorage.getItem('feiyang_cloud_api_key') || '';
+                  const savedBase = localStorage.getItem('feiyang_cloud_api_base') || 'https://ark.cn-beijing.volces.com/api/plan/v3';
+                  const savedModel = localStorage.getItem('feiyang_cloud_model') || 'deepseek-v4-flash';
+                  setConfig(prev => ({
+                    ...prev,
+                    openai_api_key: savedKey,
+                    openai_api_base: savedBase,
+                    llm_model: savedModel
+                  }));
+                }}
+              >
+                ☁️ 云端通道 (Volcengine Ark)
+              </button>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                style={{
+                  flex: 1,
+                  padding: '0.5rem',
+                  fontSize: '0.85rem',
+                  background: config.openai_api_base.includes('localhost') || config.openai_api_base.includes('127.0.0.1') ? 'rgba(16, 185, 129, 0.1)' : 'rgba(255,255,255,0.05)',
+                  borderColor: config.openai_api_base.includes('localhost') || config.openai_api_base.includes('127.0.0.1') ? 'rgb(16, 185, 129)' : 'rgba(255,255,255,0.1)',
+                  color: config.openai_api_base.includes('localhost') || config.openai_api_base.includes('127.0.0.1') ? 'rgb(16, 185, 129)' : 'var(--text-muted)',
+                  borderWidth: '1px',
+                  borderStyle: 'solid',
+                  cursor: 'pointer'
+                }}
+                onClick={() => setConfig(prev => ({
+                  ...prev,
+                  openai_api_key: 'ollama',
+                  openai_api_base: 'http://localhost:11434/v1',
+                  llm_model: 'minicpm-16k'
+                }))}
+              >
+                💻 本地通道 (Ollama 1B)
+              </button>
+            </div>
           </div>
 
           <div className="form-group">
