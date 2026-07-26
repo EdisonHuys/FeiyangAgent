@@ -371,6 +371,22 @@ def clean_and_compress(data_frames, fib_levels, symbol, fib_4h=None, key_levels=
     """
     compressed_market_data = {}
 
+    def dynamic_round_price(v):
+        if v is None:
+            return 0.0
+        val = float(v)
+        abs_val = abs(val)
+        if abs_val >= 1000:
+            return round(val, 2)
+        elif abs_val >= 100:
+            return round(val, 3)
+        elif abs_val >= 1:
+            return round(val, 4)
+        elif abs_val >= 0.1:
+            return round(val, 5)
+        else:
+            return round(val, 6)
+
     for timeframe, df in data_frames.items():
         # Get the last 5 rows (increased from 3 for better context)
         latest_rows = df.tail(5).copy()
@@ -393,7 +409,20 @@ def clean_and_compress(data_frames, fib_levels, symbol, fib_4h=None, key_levels=
             for col in cols_to_round:
                 val = row.get(col)
                 if pd.notna(val):
-                    record[col] = round(float(val), 2)
+                    abs_val = abs(float(val))
+                    if col in ['RSI_14', 'ADX_14', 'KDJ_K', 'KDJ_D', 'KDJ_J', 'volume']:
+                        record[col] = round(float(val), 2)
+                    elif col in ['MACD_DIF', 'MACD_Hist', 'MACD_DEA']:
+                        if abs_val == 0:
+                            record[col] = 0.0
+                        elif abs_val >= 1:
+                            record[col] = round(float(val), 4)
+                        elif abs_val >= 0.1:
+                            record[col] = round(float(val), 5)
+                        else:
+                            record[col] = round(float(val), 7)
+                    else:
+                        record[col] = dynamic_round_price(val)
                 else:
                     record[col] = None
             records.append(record)
@@ -402,11 +431,11 @@ def clean_and_compress(data_frames, fib_levels, symbol, fib_4h=None, key_levels=
 
     # Helper to round Fib levels
     def round_dict_values(d):
-        return {k: round(v, 2) for k, v in d.items()}
+        return {k: dynamic_round_price(v) for k, v in d.items()}
 
     rounded_fib = {
-        "swing_high": round(fib_levels["swing_high"], 2),
-        "swing_low": round(fib_levels["swing_low"], 2),
+        "swing_high": dynamic_round_price(fib_levels["swing_high"]),
+        "swing_low": dynamic_round_price(fib_levels["swing_low"]),
         "upward_levels": round_dict_values(fib_levels["upward_levels"]),
         "downward_levels": round_dict_values(fib_levels["downward_levels"])
     }
@@ -420,15 +449,15 @@ def clean_and_compress(data_frames, fib_levels, symbol, fib_4h=None, key_levels=
 
     payload = {
         "symbol": symbol,
-        "current_price": round(current_price, 2),
+        "current_price": dynamic_round_price(current_price),
         "fibonacci_levels_1d": rounded_fib,
     }
 
     # Add 4H fibonacci if available
     if fib_4h:
         payload["fibonacci_levels_4h"] = {
-            "swing_high": round(fib_4h["swing_high"], 2),
-            "swing_low": round(fib_4h["swing_low"], 2),
+            "swing_high": dynamic_round_price(fib_4h["swing_high"]),
+            "swing_low": dynamic_round_price(fib_4h["swing_low"]),
             "levels": round_dict_values(fib_4h["levels"])
         }
 

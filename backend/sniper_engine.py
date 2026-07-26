@@ -10,6 +10,22 @@ logger = logging.getLogger(__name__)
 # Perpetual futures funding settles every 8 hours (UTC 00:00 / 08:00 / 16:00)
 FUNDING_EPOCH_SECONDS = 8 * 3600
 
+def dynamic_round_price(v):
+    if v is None:
+        return 0.0
+    val = float(v)
+    abs_val = abs(val)
+    if abs_val >= 1000:
+        return round(val, 2)
+    elif abs_val >= 100:
+        return round(val, 3)
+    elif abs_val >= 1:
+        return round(val, 4)
+    elif abs_val >= 0.1:
+        return round(val, 5)
+    else:
+        return round(val, 6)
+
 class SniperEngine:
     def __init__(self, root_dir):
         self.root_dir = root_dir
@@ -1320,19 +1336,19 @@ class SniperEngine:
 
         entry_min = float(min(raw_min, raw_max))
         entry_max = float(max(raw_min, raw_max))
-        entry_mid = round((entry_min + entry_max) / 2.0, 2)
+        entry_mid = dynamic_round_price((entry_min + entry_max) / 2.0)
         # 🪜 Ladder order: split position into 3 tranches across entry zone
         # Tranche 1 (40%): at entry_min — aggressive edge catch
         # Tranche 2 (35%): at midpoint — core position
         # Tranche 3 (25%): at entry_max — deep pullback bonus
         ladder = [
-            {"price": round(entry_min, 2), "ratio": 0.40, "filled": False},
+            {"price": dynamic_round_price(entry_min), "ratio": 0.40, "filled": False},
             {"price": entry_mid, "ratio": 0.35, "filled": False},
-            {"price": round(entry_max, 2), "ratio": 0.25, "filled": False},
+            {"price": dynamic_round_price(entry_max), "ratio": 0.25, "filled": False},
         ]
         # Weighted average entry for display/sizing (assumes all 3 fill)
-        planned_entry = round(
-            ladder[0]["price"] * 0.40 + ladder[1]["price"] * 0.35 + ladder[2]["price"] * 0.25, 2
+        planned_entry = dynamic_round_price(
+            ladder[0]["price"] * 0.40 + ladder[1]["price"] * 0.35 + ladder[2]["price"] * 0.25
         )
         sl = float(json_signal.get("stop_loss", 0.0))
 
@@ -1591,7 +1607,7 @@ class SniperEngine:
 
                     if ord_status == "closed" and t["status"] == "pending":
                         t["status"] = "filled"
-                        t["actual_entry"] = float(live_ord.get("price") or planned_entry)
+                        t["actual_entry"] = float(live_ord.get("average") or live_ord.get("price") or planned_entry)
                         updated = True
 
                         # 🛡️ Exchange-side protective stop: keeps the position
