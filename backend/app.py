@@ -103,21 +103,25 @@ PROMPT_PATH = os.path.join(root_dir, "feiyang_prompt.txt")
 sniper_engine = SniperEngine(root_dir)
 backtest_runner = BacktestRunner(root_dir)
 
+signals_lock = threading.Lock()
+
 def load_signals_state() -> dict:
-    if os.path.exists(STATE_FILE_PATH):
-        try:
-            with open(STATE_FILE_PATH, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception as e:
-            logger.warning(f"Failed to load signal state file: {e}")
-    return {}
+    with signals_lock:
+        if os.path.exists(STATE_FILE_PATH):
+            try:
+                with open(STATE_FILE_PATH, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception as e:
+                logger.warning(f"Failed to load signal state file: {e}")
+        return {}
 
 def save_signals_state(state: dict):
-    try:
-        with open(STATE_FILE_PATH, "w", encoding="utf-8") as f:
-            json.dump(state, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        logger.warning(f"Failed to save signal state file: {e}")
+    with signals_lock:
+        try:
+            with open(STATE_FILE_PATH, "w", encoding="utf-8") as f:
+                json.dump(state, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.warning(f"Failed to save signal state file: {e}")
 
 def process_signal_evaluation(symbol: str, payload: dict, json_signal: dict, markdown_report: str, yaml_cfg: dict, source_tag: str = "24H盯盘"):
     """
@@ -1227,7 +1231,10 @@ def start_background_monitor():
                 if (enabled or sniper_active) and api_key:
                     log_monitor_event(f"🔄 [{scan_mins}分钟定时诊断] 启动新一轮大模型深度诊盘，目标币种：{', '.join(symbols)}")
                     logger.info(f"[{scan_mins}M LLM Monitor] Starting cycle for symbols: {symbols}")
-                    for symbol in symbols:
+                    
+                    from concurrent.futures import ThreadPoolExecutor
+
+                    def diagnose_symbol(symbol):
                         try:
                             log_monitor_event(f"📊 [正在诊断] 币对：{symbol}... 正在拉取多周期 K 线并计算指标")
                             fetcher = get_data_fetcher(exchange_id)
@@ -1284,11 +1291,20 @@ def start_background_monitor():
                             consensus_on = yaml_cfg.get("llm", {}).get("consensus_enabled", True)
                             json_signal, markdown_report = agent.analyze_with_consensus(payload, consensus_enabled=consensus_on)
                             process_signal_evaluation(symbol, payload, json_signal, markdown_report, yaml_cfg, source_tag=f"{scan_mins}M定时诊断")
-                            # Keep last processed_dfs for dynamic interval calculation
-                            last_processed_dfs = processed_dfs
+                            return processed_dfs
                         except Exception as inner_e:
                             logger.error(f"[{scan_mins}M LLM Monitor] Error analyzing {symbol}: {inner_e}")
                             log_monitor_event(f"❌ [诊断失败] {symbol}。原因：{str(inner_e)}")
+                            return None
+
+                    # Use ThreadPoolExecutor to run diagnostics concurrently
+                    with ThreadPoolExecutor(max_workers=min(len(symbols), 8)) as executor:
+                        results = list(executor.map(diagnose_symbol, symbols))
+                    
+                    # Update last processed_dfs from successful runs
+                    valid_dfs = [r for r in results if r is not None]
+                    if valid_dfs:
+                        last_processed_dfs = valid_dfs[-1]
 
                     # Dynamic scan interval: adjust based on market volatility
                     dynamic_mins = _compute_dynamic_scan_interval(scan_mins, last_processed_dfs)
