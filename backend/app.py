@@ -123,11 +123,37 @@ def save_signals_state(state: dict):
         except Exception as e:
             logger.warning(f"Failed to save signal state file: {e}")
 
+reports_lock = threading.Lock()
+
 def process_signal_evaluation(symbol: str, payload: dict, json_signal: dict, markdown_report: str, yaml_cfg: dict, source_tag: str = "24H盯盘"):
     """
     Unified signal lifecycle evaluation & notification dispatcher.
     Used by both 24H background monitor and manual analysis API.
     """
+    # Save the latest report for this symbol
+    try:
+        reports_file = os.path.join(root_dir, "last_reports.json")
+        with reports_lock:
+            reports_data = {}
+            if os.path.exists(reports_file):
+                try:
+                    with open(reports_file, "r", encoding="utf-8") as f:
+                        reports_data = json.load(f)
+                except Exception:
+                    pass
+            reports_data[symbol] = {
+                "signal": json_signal,
+                "report": markdown_report,
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            }
+            try:
+                with open(reports_file, "w", encoding="utf-8") as f:
+                    json.dump(reports_data, f, ensure_ascii=False, indent=2)
+            except Exception as save_err:
+                logger.warning(f"Failed to save latest report for {symbol}: {save_err}")
+    except Exception as e:
+        logger.warning(f"Error handling last_reports saving: {e}")
+
     try:
         current_price = float(payload.get("current_price", 0.0))
     except (ValueError, TypeError):
@@ -176,7 +202,7 @@ def process_signal_evaluation(symbol: str, payload: dict, json_signal: dict, mar
     if sig_type == "wait":
         last_signals[symbol] = {"signal_type": "wait"}
         save_signals_state(last_signals)
-        log_monitor_event(f"✅ [{source_tag}] {symbol} 诊断完成。交易决策：WAIT (观望等待)，当前价：${current_price}。已静默不发送推送。")
+        log_monitor_event(f"✅ [{source_tag}] {symbol} 诊断完成。交易决策：WAIT (观望等待)，当前价：${current_price}，置信度：{conf}/10。已静默不发送推送。")
         return
 
     if sig_type in ["long", "short"]:
@@ -501,6 +527,20 @@ def clear_monitor_logs():
     with monitor_logs_lock:
         monitor_logs.clear()
     return {"status": "success", "logs": []}
+
+@app.get("/api/reports/latest")
+def get_latest_report(symbol: str = "BTC/USDT"):
+    reports_file = os.path.join(root_dir, "last_reports.json")
+    if os.path.exists(reports_file):
+        with reports_lock:
+            try:
+                with open(reports_file, "r", encoding="utf-8") as f:
+                    reports_data = json.load(f)
+                    if symbol in reports_data:
+                        return reports_data[symbol]
+            except Exception as e:
+                logger.warning(f"Failed to read last_reports.json: {e}")
+    return {"symbol": symbol, "signal": None, "report": None, "timestamp": None}
 
 # Short-TTL cache for /api/market responses. The frontend polls this endpoint
 # every 60s; without a cache each poll re-downloads 5 timeframes x 200 candles
@@ -1232,6 +1272,13 @@ def start_background_monitor():
                     log_monitor_event(f"🔄 [{scan_mins}分钟定时诊断] 启动新一轮大模型深度诊盘，目标币种：{', '.join(symbols)}")
                     logger.info(f"[{scan_mins}M LLM Monitor] Starting cycle for symbols: {symbols}")
                     
+                    # Fetch global market context (news, fear/greed, macro) once per cycle to prevent concurrent duplicate network hits
+                    shared_market_ctx = None
+                    try:
+                        shared_market_ctx = build_market_context(symbols=symbols, exchange_id=exchange_id)
+                    except Exception as sent_e:
+                        logger.warning(f"[Monitor] Global sentiment context error: {sent_e}")
+
                     from concurrent.futures import ThreadPoolExecutor
 
                     def diagnose_symbol(symbol):
@@ -1270,13 +1317,9 @@ def start_background_monitor():
 
                             payload = clean_and_compress(processed_dfs, fib_levels, symbol, fib_4h=fib_4h, key_levels=key_levels, regime_info=regime_info, volume_spike=vol_spike)
 
-                            # Inject market sentiment & news context
-                            try:
-                                market_ctx = build_market_context(symbols=symbols, exchange_id=exchange_id)
-                                if market_ctx:
-                                    payload["market_context"] = market_ctx
-                            except Exception as sent_e:
-                                logger.warning(f"[Monitor] Sentiment context warning: {sent_e}")
+                            # Inject the pre-fetched shared market sentiment & news context
+                            if shared_market_ctx:
+                                payload["market_context"] = shared_market_ctx
                             
                             agent = FeiyangAgent(
                                 api_key=api_key,
