@@ -840,20 +840,14 @@ class SniperEngine:
         if sl_distance_pct <= 0.001:
             sl_distance_pct = 0.01
 
-        # 🛡️ Anti-liquidation leverage cap:
-        # A position is liquidated when adverse move ≈ 1/leverage (minus
-        # maintenance margin). If lev * sl_distance_pct >= ~1, the exchange
-        # force-liquidates BEFORE our stop-loss triggers — turning a planned
-        # 2% risk into a 100% margin wipeout. Cap leverage so the stop-loss
-        # always fires first, keeping a 25% safety buffer for maintenance
-        # margin, fees and wick overshoot.
-        max_safe_lev = max(1, int(0.75 / sl_distance_pct))
-        if suggested_lev > max_safe_lev:
-            logger.info(
-                f"[SniperEngine] Leverage safety cap: {suggested_lev}x -> {max_safe_lev}x "
-                f"(SL distance {round(sl_distance_pct * 100, 2)}%)"
-            )
-            suggested_lev = max_safe_lev
+        # 🛡️ Anti-liquidation leverage cap: (Disabled per user request to strictly follow configured leverage)
+        # max_safe_lev = max(1, int(0.75 / sl_distance_pct))
+        # if suggested_lev > max_safe_lev:
+        #     logger.info(
+        #         f"[SniperEngine] Leverage safety cap: {suggested_lev}x -> {max_safe_lev}x "
+        #         f"(SL distance {round(sl_distance_pct * 100, 2)}%)"
+        #     )
+        #     suggested_lev = max_safe_lev
 
         pos_value_usd = risk_amount / sl_distance_pct
         margin_usd = pos_value_usd / suggested_lev
@@ -1787,25 +1781,23 @@ class SniperEngine:
                     )
                     continue
 
-            # 🛡️ Anti-needle-sweep: add 0.15% wick tolerance to SL level
-            # This prevents stop-hunt wicks from triggering SL at exact levels
-            wick_tolerance = 0.0015  # 0.15%
-            if sig_type == "long":
-                effective_sl = sl * (1 - wick_tolerance)
-            else:
-                effective_sl = sl * (1 + wick_tolerance)
+            # 🛡️ PnL-based risk control (风控用实际盈亏做风控)
+            max_trade_loss_pct = float(cfg.get("max_trade_loss_percent", 80.0))
+            pnl_breached = (float_pct * 100.0 <= -max_trade_loss_pct)
 
             if sig_type == "long":
-                if low_price <= effective_sl:
+                if low_price <= effective_sl or pnl_breached:
                     rem_ratio = 0.5 if t.get("tp1_partial_closed") else 1.0
-                    if not self._try_live_close(t, symbol, "long", round(amount * rem_ratio, 4), reason=f"双保险触发：价格 ${low_price} 触及/穿透止损线 ${sl}", alert_tag="sl", current_price=low_price):
+                    trigger_reason = f"双保险触发：价格 ${low_price} 触及/穿透止损线 ${sl}" if not pnl_breached else f"实际盈亏风控触发：浮动亏损率达 {round(float_pct * 100.0, 2)}% 触及风控阈值 -{max_trade_loss_pct}%"
+                    if not self._try_live_close(t, symbol, "long", round(amount * rem_ratio, 4), reason=trigger_reason, alert_tag="sl", current_price=low_price):
                         updated = True
                         continue
                     t["status"] = "closed_sl"
                     t["closed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    t["close_reason"] = f"🛡️ 双保险生效：触发防守线止损 (${sl})" if not t.get("tp1_partial_closed") else f"🛡️ 触及保本止损线离场 (${sl})"
+                    t["close_reason"] = trigger_reason
                     taker_fee, _, slippage = self._fee_rates()
-                    exec_price = sl * (1 - slippage)
+                    exit_price = current_price if pnl_breached else sl
+                    exec_price = exit_price * (1 - slippage)
                     loss_pct = (exec_price - actual_entry) / actual_entry * lev
                     exit_fee = self._record_fee(t, pos_val * rem_ratio, taker_fee)
                     leg_net = round(margin * rem_ratio * loss_pct - exit_fee, 2)
@@ -1814,11 +1806,11 @@ class SniperEngine:
                     if not t.get("is_live"):
                         cfg["paper_account_balance"] = round(cfg["paper_account_balance"] + leg_net, 2)
                     updated = True
-                    logger.info(f"[SniperEngine] [{symbol}] LONG Dual-Insurance SL Triggered: PnL=${t['pnl_usd']}")
+                    logger.info(f"[SniperEngine] [{symbol}] LONG SL Triggered ({trigger_reason}): PnL=${t['pnl_usd']}")
 
                     self._send_notification(
                         f"🛡️ 狙击风控触发离场：{symbol}",
-                        f"🛡️ *【双保险平仓通知】*\n币种：{symbol} (LONG)\n平仓触发价：${low_price} | 止损线：${sl}\n实现盈亏：${t['pnl_usd']} USD ({t['pnl_percent']}%)（已扣手续费 ${t.get('fees_usd', 0)}）\n原因：{t['close_reason']}"
+                        f"🛡️ *【风控平仓通知】*\n币种：{symbol} (LONG)\n平仓触发价：${low_price if not pnl_breached else current_price} | 止损线：${sl}\n实现盈亏：${t['pnl_usd']} USD ({t['pnl_percent']}%)\n原因：{t['close_reason']}"
                     )
                     continue
 
@@ -1867,16 +1859,18 @@ class SniperEngine:
                     )
 
             elif sig_type == "short":
-                if high_price >= effective_sl:
+                if high_price >= effective_sl or pnl_breached:
                     rem_ratio = 0.5 if t.get("tp1_partial_closed") else 1.0
-                    if not self._try_live_close(t, symbol, "short", round(amount * rem_ratio, 4), reason=f"双保险触发：价格 ${high_price} 触及/穿透止损线 ${sl}", alert_tag="sl", current_price=high_price):
+                    trigger_reason = f"双保险触发：价格 ${high_price} 触及/穿透止损线 ${sl}" if not pnl_breached else f"实际盈亏风控触发：浮动亏损率达 {round(float_pct * 100.0, 2)}% 触及风控阈值 -{max_trade_loss_pct}%"
+                    if not self._try_live_close(t, symbol, "short", round(amount * rem_ratio, 4), reason=trigger_reason, alert_tag="sl", current_price=high_price):
                         updated = True
                         continue
                     t["status"] = "closed_sl"
                     t["closed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    t["close_reason"] = f"🛡️ 双保险生效：触发防守线止损 (${sl})" if not t.get("tp1_partial_closed") else f"🛡️ 触及保本止损线离场 (${sl})"
+                    t["close_reason"] = trigger_reason
                     taker_fee, _, slippage = self._fee_rates()
-                    exec_price = sl * (1 + slippage)
+                    exit_price = current_price if pnl_breached else sl
+                    exec_price = exit_price * (1 + slippage)
                     loss_pct = (actual_entry - exec_price) / actual_entry * lev
                     exit_fee = self._record_fee(t, pos_val * rem_ratio, taker_fee)
                     leg_net = round(margin * rem_ratio * loss_pct - exit_fee, 2)
@@ -1885,11 +1879,11 @@ class SniperEngine:
                     if not t.get("is_live"):
                         cfg["paper_account_balance"] = round(cfg["paper_account_balance"] + leg_net, 2)
                     updated = True
-                    logger.info(f"[SniperEngine] [{symbol}] SHORT Dual-Insurance SL Triggered: PnL=${t['pnl_usd']}")
+                    logger.info(f"[SniperEngine] [{symbol}] SHORT SL Triggered ({trigger_reason}): PnL=${t['pnl_usd']}")
 
                     self._send_notification(
                         f"🛡️ 狙击风控触发离场：{symbol}",
-                        f"🛡️ *【双保险平仓通知】*\n币种：{symbol} (SHORT)\n平仓触发价：${high_price} | 止损线：${sl}\n实现盈亏：${t['pnl_usd']} USD ({t['pnl_percent']}%)（已扣手续费 ${t.get('fees_usd', 0)}）\n原因：{t['close_reason']}"
+                        f"🛡️ *【风控平仓通知】*\n币种：{symbol} (SHORT)\n平仓触发价：${high_price if not pnl_breached else current_price} | 止损线：${sl}\n实现盈亏：${t['pnl_usd']} USD ({t['pnl_percent']}%)\n原因：{t['close_reason']}"
                     )
                     continue
 
