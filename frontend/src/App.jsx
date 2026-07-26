@@ -93,6 +93,39 @@ export default function App() {
     };
   }, [activeSymbol]);
 
+  // Fetch latest background scan report for the active symbol
+  useEffect(() => {
+    let active = true;
+    const fetchLatestReport = () => {
+      fetch(`${API_BASE}/api/reports/latest?symbol=${encodeURIComponent(activeSymbol)}`)
+        .then(res => res.json())
+        .then(data => {
+          if (!active) return;
+          if (data && data.report) {
+            setPrediction({
+              signal: data.signal,
+              report: data.report
+            });
+          } else {
+            setPrediction(null);
+          }
+        })
+        .catch(err => {
+          console.error("Error fetching latest report:", err);
+        });
+    };
+
+    fetchLatestReport();
+    
+    // Poll every 15s for background scan updates
+    const intervalId = setInterval(fetchLatestReport, 15000);
+
+    return () => {
+      active = false;
+      clearInterval(intervalId);
+    };
+  }, [activeSymbol]);
+
   // 3. Update ChartData whenever selectedTimeframe changes
   useEffect(() => {
     if (marketData) {
