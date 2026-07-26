@@ -92,7 +92,7 @@ export default function SniperDashboard({ apiBase }) {
 
     const closed = trades.filter(t => ['closed_tp', 'closed_sl'].includes(t.status)).reverse();
     if (closed.length === 0) {
-      ctx.fillStyle = '#8892b0';
+      ctx.fillStyle = '#86868b';
       ctx.font = '13px sans-serif';
       ctx.textAlign = 'center';
       ctx.fillText('暂无平仓样本数据，收益曲线待生成...', width / 2, height / 2);
@@ -114,7 +114,7 @@ export default function SniperDashboard({ apiBase }) {
     const chartW = width - padding * 2;
     const chartH = height - padding * 2;
 
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.05)';
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.06)';
     ctx.lineWidth = 1;
     for (let i = 0; i <= 4; i++) {
       const y = padding + (chartH / 4) * i;
@@ -133,11 +133,11 @@ export default function SniperDashboard({ apiBase }) {
     const gradient = ctx.createLinearGradient(0, padding, 0, height - padding);
     const isProfitable = points[points.length - 1] >= 0;
     if (isProfitable) {
-      gradient.addColorStop(0, 'rgba(0, 230, 118, 0.3)');
-      gradient.addColorStop(1, 'rgba(0, 230, 118, 0.0)');
+      gradient.addColorStop(0, 'rgba(52, 199, 89, 0.3)');
+      gradient.addColorStop(1, 'rgba(52, 199, 89, 0.0)');
     } else {
-      gradient.addColorStop(0, 'rgba(255, 23, 68, 0.3)');
-      gradient.addColorStop(1, 'rgba(255, 23, 68, 0.0)');
+      gradient.addColorStop(0, 'rgba(255, 59, 48, 0.3)');
+      gradient.addColorStop(1, 'rgba(255, 59, 48, 0.0)');
     }
 
     ctx.beginPath();
@@ -152,14 +152,14 @@ export default function SniperDashboard({ apiBase }) {
     ctx.beginPath();
     ctx.moveTo(pts[0].x, pts[0].y);
     pts.forEach(p => ctx.lineTo(p.x, p.y));
-    ctx.strokeStyle = isProfitable ? '#00e676' : '#ff1744';
+    ctx.strokeStyle = isProfitable ? '#34c759' : '#ff3b30';
     ctx.lineWidth = 2.5;
     ctx.stroke();
 
     pts.forEach((p, idx) => {
       ctx.beginPath();
       ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
-      ctx.fillStyle = isProfitable ? '#00e676' : '#ff1744';
+      ctx.fillStyle = isProfitable ? '#34c759' : '#ff3b30';
       ctx.fill();
       ctx.strokeStyle = '#ffffff';
       ctx.lineWidth = 1.5;
@@ -271,6 +271,30 @@ export default function SniperDashboard({ apiBase }) {
     }
   };
 
+  const handleResetLive = async () => {
+    const inputVal = window.prompt("请输入实盘账户初始基准资金 (USD)：", "10000");
+    if (inputVal === null) return;
+    const initialBal = parseFloat(inputVal) || 10000.0;
+
+    if (!window.confirm(`确认要清空所有实盘交易记录与统计数据，并将 live 账户基准重置为 $${initialBal} USD 吗？此操作不可撤销！`)) return;
+    try {
+      const res = await fetch(`${apiBase}/api/sniper/reset-live`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ initial_balance: initialBal })
+      });
+      const data = await res.json();
+      if (data.status === 'success') {
+        alert(data.message);
+        fetchData();
+      } else {
+        alert(`清空失败：${data.message}`);
+      }
+    } catch (err) {
+      alert(`清空请求失败: ${err.message}`);
+    }
+  };
+
   const handleResetBreaker = async () => {
     if (!window.confirm('确认解除今日熔断？将以当前余额重置今日盈亏基准（已发生的亏损不再计入今日熔断判断）。')) return;
     try {
@@ -322,25 +346,25 @@ export default function SniperDashboard({ apiBase }) {
     <div className="sniper-container">
       {/* 1. Top Header & Control Center */}
       <div className="sniper-header" style={{
-        background: 'linear-gradient(135deg, rgba(15, 23, 42, 0.9), rgba(30, 41, 59, 0.7))',
-        border: '1px solid rgba(6, 182, 212, 0.25)',
+        background: 'rgba(255, 255, 255, 0.65)',
+        border: '1px solid rgba(0, 122, 255, 0.2)',
         borderRadius: '12px',
         padding: '1.25rem 1.5rem',
-        boxShadow: '0 8px 32px rgba(0, 0, 0, 0.3)',
+        boxShadow: '0 4px 24px rgba(0, 0, 0, 0.08)',
         backdropFilter: 'blur(12px)'
       }}>
         <div className="sniper-header-left">
           <div className="sniper-icon-badge" style={{
-            background: 'rgba(6, 182, 212, 0.12)',
-            border: '1px solid rgba(6, 182, 212, 0.3)',
-            color: '#06B6D4'
+            background: 'rgba(0, 122, 255, 0.08)',
+            border: '1px solid rgba(0, 122, 255, 0.2)',
+            color: '#0077b6'
           }}>
             <Target size={28} />
           </div>
           <div className="sniper-title-box">
             <div className="sniper-title-row" style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
               <h2 className="sniper-title" style={{ fontSize: '1.25rem', fontWeight: 800 }}>🎯 飞扬精准狙击系统</h2>
-              <span className="badge-tag" style={{ background: 'rgba(0, 230, 118, 0.12)', color: 'var(--color-long)', borderColor: 'rgba(0, 230, 118, 0.3)' }}>
+              <span className="badge-tag" style={{ background: 'rgba(52, 199, 89, 0.08)', color: 'var(--color-long)', borderColor: 'rgba(52, 199, 89, 0.2)' }}>
                 防御型右侧建仓埋伏
               </span>
             </div>
@@ -352,7 +376,7 @@ export default function SniperDashboard({ apiBase }) {
 
         {/* Master Switcher */}
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'nowrap' }}>
-          <div className="sniper-mode-bar" style={{ background: 'rgba(15, 23, 42, 0.8)', padding: '3px', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
+          <div className="sniper-mode-bar" style={{ background: 'rgba(255, 255, 255, 0.6)', padding: '3px', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
             <button
               onClick={() => handleModeChange('off')}
               className={`sniper-mode-btn ${mode === 'off' ? 'active-off' : ''}`}
@@ -377,11 +401,23 @@ export default function SniperDashboard({ apiBase }) {
             <button
               onClick={handleResetPaper}
               className="btn btn-secondary"
-              style={{ padding: '0.4rem 0.65rem', fontSize: '0.78rem', display: 'flex', alignItems: 'center', gap: '0.3rem', color: '#EF4444', borderColor: 'rgba(239,68,68,0.3)', whiteSpace: 'nowrap' }}
+              style={{ padding: '0.4rem 0.65rem', fontSize: '0.78rem', display: 'flex', alignItems: 'center', gap: '0.3rem', color: '#d70015', borderColor: 'rgba(255,59,48,0.2)', whiteSpace: 'nowrap' }}
               title="清空模拟盘履约与盈亏曲线，重新设置初始资金"
             >
               <RotateCcw size={14} />
               <span>重置模拟本金</span>
+            </button>
+          )}
+
+          {mode === 'live' && (
+            <button
+              onClick={handleResetLive}
+              className="btn btn-secondary"
+              style={{ padding: '0.4rem 0.65rem', fontSize: '0.78rem', display: 'flex', alignItems: 'center', gap: '0.3rem', color: '#d70015', borderColor: 'rgba(255,59,48,0.2)', whiteSpace: 'nowrap' }}
+              title="清空实盘交易记录与统计数据，重置 live 账户基准"
+            >
+              <RotateCcw size={14} />
+              <span>清空实盘统计</span>
             </button>
           )}
 
@@ -409,12 +445,12 @@ export default function SniperDashboard({ apiBase }) {
       {dashboardData?.circuit_breaker?.halted && (
         <div style={{
           marginBottom: '1rem', padding: '0.85rem 1.25rem', borderRadius: '10px',
-          background: 'rgba(239, 68, 68, 0.12)', border: '1px solid rgba(239, 68, 68, 0.45)',
+          background: 'rgba(255, 59, 48, 0.06)', border: '1px solid rgba(255, 59, 48, 0.2)',
           display: 'flex', alignItems: 'center', gap: '0.6rem'
         }}>
-          <AlertCircle size={20} style={{ color: '#EF4444', flexShrink: 0 }} />
+          <AlertCircle size={20} style={{ color: '#d70015', flexShrink: 0 }} />
           <div style={{ flex: 1 }}>
-            <div style={{ color: '#EF4444', fontWeight: 700, fontSize: '0.9rem' }}>
+            <div style={{ color: '#d70015', fontWeight: 700, fontSize: '0.9rem' }}>
               🚨 日内回撤熔断已触发（{mode.toUpperCase()} 模式）— 今日已停止开新单并撤销全部挂单
             </div>
             <div style={{ color: 'var(--text-muted)', fontSize: '0.78rem', marginTop: '0.15rem' }}>
@@ -424,7 +460,7 @@ export default function SniperDashboard({ apiBase }) {
           <button
             onClick={handleResetBreaker}
             className="btn btn-secondary"
-            style={{ padding: '0.35rem 0.7rem', fontSize: '0.75rem', color: '#EF4444', borderColor: 'rgba(239,68,68,0.5)', whiteSpace: 'nowrap' }}
+            style={{ padding: '0.35rem 0.7rem', fontSize: '0.75rem', color: '#d70015', borderColor: 'rgba(255,59,48,0.25)', whiteSpace: 'nowrap' }}
             title="解除熔断并以当前余额重置今日盈亏基准"
           >
             🔓 解除熔断
@@ -435,12 +471,12 @@ export default function SniperDashboard({ apiBase }) {
       {/* 2. Key Telemetry Metric Cards */}
       <div className="sniper-grid">
         {/* Win Rate */}
-        <div className="sniper-card" style={{ background: 'linear-gradient(135deg, rgba(15, 23, 42, 0.8), rgba(30, 41, 59, 0.6))', border: '1px solid rgba(245, 158, 11, 0.3)' }}>
+        <div className="sniper-card" style={{ background: 'rgba(255, 255, 255, 0.55)', border: '1px solid rgba(255, 149, 0, 0.2)' }}>
           <div className="sniper-card-header">
             <span>交易胜率 (Win Rate)</span>
-            <Award size={18} style={{ color: '#F59E0B' }} />
+            <Award size={18} style={{ color: '#b25000' }} />
           </div>
-          <div className="sniper-card-val" style={{ color: '#F59E0B', fontSize: '1.4rem', fontWeight: 800 }}>
+          <div className="sniper-card-val" style={{ color: '#b25000', fontSize: '1.4rem', fontWeight: 800 }}>
             {winRate}%
           </div>
           <div className="sniper-card-sub">
@@ -449,12 +485,12 @@ export default function SniperDashboard({ apiBase }) {
         </div>
 
         {/* Net Profit */}
-        <div className="sniper-card" style={{ background: 'linear-gradient(135deg, rgba(15, 23, 42, 0.8), rgba(30, 41, 59, 0.6))', border: `1px solid ${netProfit >= 0 ? 'rgba(16, 185, 129, 0.3)' : 'rgba(239, 68, 68, 0.3)'}` }}>
+        <div className="sniper-card" style={{ background: 'rgba(255, 255, 255, 0.55)', border: `1px solid ${netProfit >= 0 ? 'rgba(52, 199, 89, 0.2)' : 'rgba(255, 59, 48, 0.2)'}` }}>
           <div className="sniper-card-header">
             <span>已实现累计净收益</span>
-            <TrendingUp size={18} style={{ color: netProfit >= 0 ? '#10B981' : '#EF4444' }} />
+            <TrendingUp size={18} style={{ color: netProfit >= 0 ? '#248a3d' : '#d70015' }} />
           </div>
-          <div className="sniper-card-val" style={{ color: netProfit >= 0 ? '#10B981' : '#EF4444', fontSize: '1.4rem', fontWeight: 800 }}>
+          <div className="sniper-card-val" style={{ color: netProfit >= 0 ? '#248a3d' : '#d70015', fontSize: '1.4rem', fontWeight: 800 }}>
             {netProfit >= 0 ? '+' : ''}${netProfit.toFixed(2)} USD
           </div>
           <div className="sniper-card-sub">
@@ -463,12 +499,12 @@ export default function SniperDashboard({ apiBase }) {
         </div>
 
         {/* Leverage & Risk */}
-        <div className="sniper-card" style={{ background: 'linear-gradient(135deg, rgba(15, 23, 42, 0.8), rgba(30, 41, 59, 0.6))', border: '1px solid rgba(6, 182, 212, 0.3)' }}>
+        <div className="sniper-card" style={{ background: 'rgba(255, 255, 255, 0.55)', border: '1px solid rgba(0, 122, 255, 0.2)' }}>
           <div className="sniper-card-header">
             <span>风控偏好与杠杆模式</span>
-            <ShieldAlert size={18} style={{ color: '#06B6D4' }} />
+            <ShieldAlert size={18} style={{ color: '#0077b6' }} />
           </div>
-          <div className="sniper-card-val" style={{ color: '#06B6D4', fontSize: '1.4rem', fontWeight: 800 }}>
+          <div className="sniper-card-val" style={{ color: '#0077b6', fontSize: '1.4rem', fontWeight: 800 }}>
             {formConfig.leverage_mode === 'fixed' ? `${formConfig.fixed_leverage || 50}x (固定)` : `${formConfig.min_leverage || 35}-${formConfig.max_leverage || 70}x (智能)`}
           </div>
           <div className="sniper-card-sub">
@@ -477,12 +513,12 @@ export default function SniperDashboard({ apiBase }) {
         </div>
 
         {/* Active Positions */}
-        <div className="sniper-card" style={{ background: 'linear-gradient(135deg, rgba(15, 23, 42, 0.8), rgba(30, 41, 59, 0.6))', border: '1px solid rgba(168, 85, 247, 0.3)' }}>
+        <div className="sniper-card" style={{ background: 'rgba(255, 255, 255, 0.55)', border: '1px solid rgba(175, 82, 222, 0.2)' }}>
           <div className="sniper-card-header">
             <span>实时埋伏/活跃仓位</span>
-            <Layers size={18} style={{ color: '#A855F7' }} />
+            <Layers size={18} style={{ color: '#8944ab' }} />
           </div>
-          <div className="sniper-card-val" style={{ color: '#A855F7', fontSize: '1.4rem', fontWeight: 800 }}>
+          <div className="sniper-card-val" style={{ color: '#8944ab', fontSize: '1.4rem', fontWeight: 800 }}>
             {trades.filter(t => ['pending', 'filled', 'tp1_hit'].includes(t.status)).length} <span style={{ fontSize: '0.85rem', color: 'var(--text-muted)', fontWeight: 400 }}>/ 最多 {formConfig.max_active_trades} 单</span>
           </div>
           <div className="sniper-card-sub">
@@ -491,12 +527,12 @@ export default function SniperDashboard({ apiBase }) {
         </div>
 
         {/* Max Drawdown */}
-        <div className="sniper-card" style={{ background: 'linear-gradient(135deg, rgba(15, 23, 42, 0.8), rgba(30, 41, 59, 0.6))', border: '1px solid rgba(239, 68, 68, 0.3)' }}>
+        <div className="sniper-card" style={{ background: 'rgba(255, 255, 255, 0.55)', border: '1px solid rgba(255, 59, 48, 0.2)' }}>
           <div className="sniper-card-header">
             <span>历史最大回撤 (Max DD)</span>
-            <Activity size={18} style={{ color: '#EF4444' }} />
+            <Activity size={18} style={{ color: '#d70015' }} />
           </div>
-          <div className="sniper-card-val" style={{ color: (dashboardData?.max_drawdown_percent || 0) > 10 ? '#EF4444' : '#2979FF', fontSize: '1.4rem', fontWeight: 800 }}>
+          <div className="sniper-card-val" style={{ color: (dashboardData?.max_drawdown_percent || 0) > 10 ? '#d70015' : '#007aff', fontSize: '1.4rem', fontWeight: 800 }}>
             -{dashboardData?.max_drawdown_percent || 0}%
           </div>
           <div className="sniper-card-sub">
@@ -505,16 +541,16 @@ export default function SniperDashboard({ apiBase }) {
         </div>
 
         {/* Circuit Breaker & Trading Costs */}
-        <div className="sniper-card" style={{ background: 'linear-gradient(135deg, rgba(15, 23, 42, 0.8), rgba(30, 41, 59, 0.6))', border: `1px solid ${dashboardData?.circuit_breaker?.halted ? 'rgba(239, 68, 68, 0.4)' : 'rgba(16, 185, 129, 0.3)'}` }}>
+        <div className="sniper-card" style={{ background: 'rgba(255, 255, 255, 0.55)', border: `1px solid ${dashboardData?.circuit_breaker?.halted ? 'rgba(255, 59, 48, 0.25)' : 'rgba(52, 199, 89, 0.2)'}` }}>
           <div className="sniper-card-header">
             <span>日内熔断与交易成本</span>
-            <ShieldAlert size={18} style={{ color: dashboardData?.circuit_breaker?.halted ? '#EF4444' : '#10B981' }} />
+            <ShieldAlert size={18} style={{ color: dashboardData?.circuit_breaker?.halted ? '#d70015' : '#248a3d' }} />
           </div>
-          <div className="sniper-card-val" style={{ color: dashboardData?.circuit_breaker?.halted ? '#EF4444' : '#10B981', fontSize: '1.15rem', fontWeight: 800 }}>
+          <div className="sniper-card-val" style={{ color: dashboardData?.circuit_breaker?.halted ? '#d70015' : '#248a3d', fontSize: '1.15rem', fontWeight: 800 }}>
             {dashboardData?.circuit_breaker?.halted ? '🚨 已熔断停牌' : `🛡️ 守护中 (-${dashboardData?.circuit_breaker?.daily_max_loss_percent ?? 6}%)`}
           </div>
           <div className="sniper-card-sub">
-            今日盈亏: <strong style={{ color: (dashboardData?.circuit_breaker?.day_realized_pnl ?? 0) >= 0 ? '#10B981' : '#EF4444' }}>{dashboardData?.circuit_breaker?.day_realized_pnl ?? 0} USD</strong>
+            今日盈亏: <strong style={{ color: (dashboardData?.circuit_breaker?.day_realized_pnl ?? 0) >= 0 ? '#248a3d' : '#d70015' }}>{dashboardData?.circuit_breaker?.day_realized_pnl ?? 0} USD</strong>
             {' '}| 累计手续费: <strong style={{ color: 'var(--text-bright)' }}>${dashboardData?.total_fees_usd || 0}</strong>
           </div>
         </div>
@@ -524,10 +560,10 @@ export default function SniperDashboard({ apiBase }) {
       {(() => {
         const activePositions = trades.filter(t => t.status === 'filled' || t.status === 'tp1_hit');
         return (
-          <div className="sniper-panel" style={{ padding: 0, overflow: 'hidden', border: '1px solid rgba(16, 185, 129, 0.3)', boxShadow: '0 4px 20px rgba(0, 230, 118, 0.05)' }}>
-            <div style={{ padding: '1rem 1.25rem', borderBottom: '1px solid var(--border-color)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: 'rgba(0, 230, 118, 0.04)' }}>
+          <div className="sniper-panel" style={{ padding: 0, overflow: 'hidden', border: '1px solid rgba(52, 199, 89, 0.2)', boxShadow: '0 4px 20px rgba(52, 199, 89, 0.05)' }}>
+            <div style={{ padding: '1rem 1.25rem', borderBottom: '1px solid var(--border-color)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: 'rgba(52, 199, 89, 0.04)' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
-                <div style={{ width: '10px', height: '10px', borderRadius: '50%', background: activePositions.length > 0 ? '#10B981' : '#64748B', boxShadow: activePositions.length > 0 ? '0 0 12px #10B981' : 'none' }}></div>
+                <div style={{ width: '10px', height: '10px', borderRadius: '50%', background: activePositions.length > 0 ? '#34c759' : '#86868b', boxShadow: activePositions.length > 0 ? '0 0 12px #34c759' : 'none' }}></div>
                 <h3 style={{ fontSize: '1rem', fontWeight: '700', color: 'var(--text-bright)', margin: 0 }}>
                   🔥 实时活跃持仓看板 ({activePositions.length})
                 </h3>
@@ -544,21 +580,21 @@ export default function SniperDashboard({ apiBase }) {
                       gap: '0.4rem',
                       padding: '4px 10px',
                       borderRadius: '6px',
-                      background: 'rgba(16, 185, 129, 0.15)',
-                      border: '1px solid rgba(16, 185, 129, 0.3)',
-                      color: '#10B981',
+                      background: 'rgba(52, 199, 89, 0.1)',
+                      border: '1px solid rgba(52, 199, 89, 0.2)',
+                      color: '#248a3d',
                       fontSize: '0.75rem',
                       fontWeight: '600',
                       cursor: 'pointer',
                       transition: 'all 0.2s',
                     }}
                     onMouseEnter={(e) => {
-                      e.currentTarget.style.background = 'rgba(16, 185, 129, 0.25)';
-                      e.currentTarget.style.borderColor = '#10B981';
+                      e.currentTarget.style.background = 'rgba(52, 199, 89, 0.18)';
+                      e.currentTarget.style.borderColor = '#34c759';
                     }}
                     onMouseLeave={(e) => {
-                      e.currentTarget.style.background = 'rgba(16, 185, 129, 0.15)';
-                      e.currentTarget.style.borderColor = 'rgba(16, 185, 129, 0.3)';
+                      e.currentTarget.style.background = 'rgba(52, 199, 89, 0.1)';
+                      e.currentTarget.style.borderColor = 'rgba(52, 199, 89, 0.2)';
                     }}
                   >
                     <RefreshCw size={12} className={syncingPositions ? 'spin' : ''} />
@@ -594,15 +630,15 @@ export default function SniperDashboard({ apiBase }) {
                     {activePositions.map(t => {
                       const isLong = t.signal_type.toLowerCase() === 'long';
                       return (
-                        <tr key={t.id} style={{ background: 'rgba(16, 185, 129, 0.02)' }}>
+                        <tr key={t.id} style={{ background: 'rgba(52, 199, 89, 0.02)' }}>
                           <td style={{ color: 'var(--text-muted)' }}>{t.entered_at}</td>
                           <td>
                             <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                               <strong style={{ color: 'var(--text-bright)' }}>{t.symbol}</strong>
                               <span className={`badge-tag ${isLong ? '' : 'badge-short'}`} style={{
-                                background: isLong ? 'rgba(0, 230, 118, 0.12)' : 'rgba(255, 23, 68, 0.12)',
+                                background: isLong ? 'rgba(52, 199, 89, 0.08)' : 'rgba(255, 59, 48, 0.08)',
                                 color: isLong ? 'var(--color-long)' : 'var(--color-short)',
-                                borderColor: isLong ? 'rgba(0, 230, 118, 0.3)' : 'rgba(255, 23, 68, 0.3)'
+                                borderColor: isLong ? 'rgba(52, 199, 89, 0.25)' : 'rgba(255, 59, 48, 0.25)'
                               }}>
                                 {isLong ? '做多 (LONG)' : '做空 (SHORT)'}
                               </span>
@@ -611,7 +647,7 @@ export default function SniperDashboard({ apiBase }) {
 
                           <td>
                             {t.is_external ? (
-                              <span className="badge-status" style={{ background: 'rgba(79, 70, 229, 0.2)', color: '#a5b4fc', border: '1px solid rgba(79, 70, 229, 0.4)' }}>
+                              <span className="badge-status" style={{ background: 'rgba(0, 122, 255, 0.08)', color: '#0040dd', border: '1px solid rgba(0, 122, 255, 0.2)' }}>
                                 🔌 外部/手动持仓
                               </span>
                             ) : (
@@ -633,7 +669,7 @@ export default function SniperDashboard({ apiBase }) {
 
                           {/* Explicit Real-Time Price Column */}
                           <td>
-                            <strong style={{ color: '#F59E0B', fontFamily: 'monospace', fontSize: '0.95rem' }}>
+                            <strong style={{ color: '#b25000', fontFamily: 'monospace', fontSize: '0.95rem' }}>
                               ${formatPrice(t.current_price)}
                             </strong>
                           </td>
@@ -664,17 +700,17 @@ export default function SniperDashboard({ apiBase }) {
                                   
                                   <div style={{ display: 'flex', flexWrap: 'wrap', gap: '3px', marginTop: '2px' }}>
                                     {isProfitableSL && (
-                                      <span style={{ fontSize: '0.62rem', background: 'rgba(16, 185, 129, 0.15)', color: 'var(--color-long)', padding: '1px 4px', borderRadius: '3px' }}>
+                                      <span style={{ fontSize: '0.62rem', background: 'rgba(52, 199, 89, 0.1)', color: 'var(--color-long)', padding: '1px 4px', borderRadius: '3px' }}>
                                         🛡️ 动态保利中
                                       </span>
                                     )}
                                     {t.tp1_partial_closed && (
-                                      <span style={{ fontSize: '0.62rem', background: 'rgba(16, 185, 129, 0.15)', color: 'var(--color-long)', padding: '1px 4px', borderRadius: '3px' }}>
+                                      <span style={{ fontSize: '0.62rem', background: 'rgba(52, 199, 89, 0.1)', color: 'var(--color-long)', padding: '1px 4px', borderRadius: '3px' }}>
                                         已锁保本位
                                       </span>
                                     )}
                                     {t.trailing_sl_level > 0 && (
-                                      <span style={{ fontSize: '0.62rem', background: 'rgba(251,191,36,0.15)', color: '#FCD34D', padding: '1px 4px', borderRadius: '3px' }} title={`历史最高浮盈达到 ${Math.round(t.trailing_sl_level)}%`}>
+                                      <span style={{ fontSize: '0.62rem', background: 'rgba(255,149,0,0.08)', color: '#b25000', padding: '1px 4px', borderRadius: '3px' }} title={`历史最高浮盈达到 ${Math.round(t.trailing_sl_level)}%`}>
                                         🔒 锁利 {t.locked_pnl_percent !== undefined ? t.locked_pnl_percent : Math.round(t.trailing_sl_level * 0.5)}%
                                       </span>
                                     )}
@@ -691,7 +727,7 @@ export default function SniperDashboard({ apiBase }) {
                           <td style={{ fontWeight: 'bold' }}>
                             {t.unrealized_pnl_usd !== undefined ? (
                               <span style={{
-                                color: t.unrealized_pnl_usd >= 0 ? '#10B981' : '#EF4444',
+                                color: t.unrealized_pnl_usd >= 0 ? '#248a3d' : '#d70015',
                                 fontSize: '0.95rem'
                               }}>
                                 {t.unrealized_pnl_usd >= 0 ? '+' : ''}${t.unrealized_pnl_usd} ({t.unrealized_pnl_percent >= 0 ? '+' : ''}{t.unrealized_pnl_percent}%)
@@ -705,9 +741,9 @@ export default function SniperDashboard({ apiBase }) {
                             <button
                               onClick={() => handleCloseTrade(t.id, t.symbol)}
                               style={{
-                                background: 'rgba(239, 68, 68, 0.15)',
-                                color: '#EF4444',
-                                border: '1px solid rgba(239, 68, 68, 0.4)',
+                                background: 'rgba(255, 59, 48, 0.08)',
+                                color: '#d70015',
+                                border: '1px solid rgba(255, 59, 48, 0.2)',
                                 borderRadius: '6px',
                                 padding: '3px 8px',
                                 fontSize: '0.75rem',
@@ -745,7 +781,7 @@ export default function SniperDashboard({ apiBase }) {
             ref={canvasRef}
             width={700}
             height={200}
-            style={{ width: '100%', height: '200px', background: 'rgba(0,0,0,0.2)', borderRadius: '8px' }}
+            style={{ width: '100%', height: '200px', background: 'rgba(0,0,0,0.03)', borderRadius: '8px' }}
           />
         </div>
 
@@ -763,7 +799,7 @@ export default function SniperDashboard({ apiBase }) {
                 <span style={{ color: 'var(--color-long)' }}>盈利单 (Win)</span>
                 <span style={{ color: 'var(--color-long)' }}>{dashboardData?.winning_trades_count || 0} 笔</span>
               </div>
-              <div style={{ height: '8px', background: 'rgba(255,255,255,0.05)', borderRadius: '4px', overflow: 'hidden' }}>
+              <div style={{ height: '8px', background: 'rgba(0,0,0,0.03)', borderRadius: '4px', overflow: 'hidden' }}>
                 <div style={{ height: '100%', width: `${winRate}%`, background: 'var(--color-long)', borderRadius: '4px' }} />
               </div>
             </div>
@@ -773,7 +809,7 @@ export default function SniperDashboard({ apiBase }) {
                 <span style={{ color: 'var(--color-short)' }}>止损单 (Loss)</span>
                 <span style={{ color: 'var(--color-short)' }}>{dashboardData?.losing_trades_count || 0} 笔</span>
               </div>
-              <div style={{ height: '8px', background: 'rgba(255,255,255,0.05)', borderRadius: '4px', overflow: 'hidden' }}>
+              <div style={{ height: '8px', background: 'rgba(0,0,0,0.03)', borderRadius: '4px', overflow: 'hidden' }}>
                 <div style={{ height: '100%', width: `${100 - winRate}%`, background: 'var(--color-short)', borderRadius: '4px' }} />
               </div>
             </div>
@@ -789,7 +825,7 @@ export default function SniperDashboard({ apiBase }) {
             <span>📋 狙击挂单埋伏与履约历史记录</span>
           </div>
           {/* Filter Tabs */}
-          <div style={{ display: 'flex', gap: '4px', background: 'rgba(0,0,0,0.3)', padding: '3px', borderRadius: '8px' }}>
+          <div style={{ display: 'flex', gap: '4px', background: 'rgba(0,0,0,0.03)', padding: '3px', borderRadius: '8px' }}>
             {[
               { key: 'all', label: '全部' },
               { key: 'pending', label: '⏳ 挂单中' },
@@ -808,9 +844,9 @@ export default function SniperDashboard({ apiBase }) {
                   fontWeight: 600,
                   cursor: 'pointer',
                   transition: 'all 0.2s',
-                  background: historyFilter === tab.key ? 'rgba(139, 92, 246, 0.25)' : 'transparent',
-                  color: historyFilter === tab.key ? '#A78BFA' : 'var(--text-muted)',
-                  border: historyFilter === tab.key ? '1px solid rgba(139, 92, 246, 0.4)' : '1px solid transparent',
+                  background: historyFilter === tab.key ? 'rgba(175, 82, 222, 0.1)' : 'transparent',
+                  color: historyFilter === tab.key ? '#8944ab' : 'var(--text-muted)',
+                  border: historyFilter === tab.key ? '1px solid rgba(175, 82, 222, 0.25)' : '1px solid transparent',
                 }}
               >
                 {tab.label}
@@ -861,9 +897,9 @@ export default function SniperDashboard({ apiBase }) {
                           <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                             <strong style={{ color: 'var(--text-bright)' }}>{t.symbol}</strong>
                             <span className={`badge-tag ${isLong ? '' : 'badge-short'}`} style={{
-                              background: isLong ? 'rgba(0, 230, 118, 0.12)' : 'rgba(255, 23, 68, 0.12)',
+                              background: isLong ? 'rgba(52, 199, 89, 0.08)' : 'rgba(255, 59, 48, 0.08)',
                               color: isLong ? 'var(--color-long)' : 'var(--color-short)',
-                              borderColor: isLong ? 'rgba(0, 230, 118, 0.3)' : 'rgba(255, 23, 68, 0.3)'
+                              borderColor: isLong ? 'rgba(52, 199, 89, 0.25)' : 'rgba(255, 59, 48, 0.25)'
                             }}>
                               {isLong ? '做多 (LONG)' : '做空 (SHORT)'}
                             </span>
@@ -874,7 +910,7 @@ export default function SniperDashboard({ apiBase }) {
                           {t.status === 'pending' && <span className="badge-status pending">⏳ 等待挂单回踩</span>}
                           {t.status === 'closed_tp' && <span className="badge-status closed_tp">🎉 止盈平仓</span>}
                           {t.status === 'closed_sl' && <span className="badge-status closed_sl">🛡️ 止损平仓</span>}
-                          {t.status === 'cancelled' && <span className="badge-status" style={{ background: '#334155', color: '#94a3b8' }}>⚪ 已撤单</span>}
+                          {t.status === 'cancelled' && <span className="badge-status" style={{ background: 'rgba(0,0,0,0.05)', color: '#86868b' }}>⚪ 已撤单</span>}
                         </td>
 
                         <td>
@@ -903,7 +939,7 @@ export default function SniperDashboard({ apiBase }) {
 
                         <td style={{ textAlign: 'right', fontWeight: 'bold' }}>
                           {t.pnl_usd !== 0 ? (
-                            <span style={{ color: t.pnl_usd > 0 ? '#10B981' : '#EF4444' }}>
+                            <span style={{ color: t.pnl_usd > 0 ? '#248a3d' : '#d70015' }}>
                               {t.pnl_usd > 0 ? '+' : ''}${t.pnl_usd} ({t.pnl_percent >= 0 ? '+' : ''}{t.pnl_percent}%)
                             </span>
                           ) : (
@@ -935,7 +971,7 @@ export default function SniperDashboard({ apiBase }) {
             </div>
 
             {/* Sub-tabs inside modal */}
-            <div style={{ display: 'flex', gap: '0.5rem', background: 'rgba(0,0,0,0.3)', padding: '4px', borderRadius: '8px' }}>
+            <div style={{ display: 'flex', gap: '0.5rem', background: 'rgba(0,0,0,0.03)', padding: '4px', borderRadius: '8px' }}>
               <button
                 type="button"
                 className={`btn btn-secondary ${activeSubTab === 'general' ? 'active' : ''}`}
@@ -1150,8 +1186,8 @@ export default function SniperDashboard({ apiBase }) {
                   borderRadius: '8px',
                   fontSize: '0.8rem',
                   border: '1px solid',
-                  background: exchangeTestResult.status === 'success' ? 'rgba(0,230,118,0.1)' : 'rgba(255,23,68,0.1)',
-                  borderColor: exchangeTestResult.status === 'success' ? 'rgba(0,230,118,0.3)' : 'rgba(255,23,68,0.3)',
+                  background: exchangeTestResult.status === 'success' ? 'rgba(52,199,89,0.06)' : 'rgba(255,59,48,0.06)',
+                  borderColor: exchangeTestResult.status === 'success' ? 'rgba(52,199,89,0.2)' : 'rgba(255,59,48,0.2)',
                   color: exchangeTestResult.status === 'success' ? 'var(--color-long)' : 'var(--color-short)',
                   lineHeight: '1.4'
                 }}>

@@ -107,15 +107,15 @@ export default function PromptEditorPanel({ apiBase, standalone = true }) {
           </h3>
           {promptIsCustom ? (
             <span style={{
-              fontSize: '0.75rem', color: '#F59E0B', background: 'rgba(245, 158, 11, 0.12)',
-              border: '1px solid rgba(245, 158, 11, 0.4)', borderRadius: '4px', padding: '0.2rem 0.5rem', fontWeight: 600
+              fontSize: '0.75rem', color: '#b25000', background: 'rgba(255, 149, 0, 0.08)',
+              border: '1px solid rgba(255, 149, 0, 0.4)', borderRadius: '4px', padding: '0.2rem 0.5rem', fontWeight: 600
             }}>
               ★ 自定义生效中
             </span>
           ) : (
             <span style={{
-              fontSize: '0.75rem', color: '#10B981', background: 'rgba(16, 185, 129, 0.12)',
-              border: '1px solid rgba(16, 185, 129, 0.4)', borderRadius: '4px', padding: '0.2rem 0.5rem', fontWeight: 600
+              fontSize: '0.75rem', color: '#248a3d', background: 'rgba(52, 199, 89, 0.08)',
+              border: '1px solid rgba(52, 199, 89, 0.4)', borderRadius: '4px', padding: '0.2rem 0.5rem', fontWeight: 600
             }}>
               ✓ 内置默认
             </span>
@@ -158,7 +158,7 @@ export default function PromptEditorPanel({ apiBase, standalone = true }) {
         lineHeight: '1.6'
       }}>
         <div style={{ color: 'var(--text-bright)', fontWeight: 600, marginBottom: '0.3rem', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-          <Sparkles size={15} style={{ color: '#06B6D4' }} />
+          <Sparkles size={15} style={{ color: '#007aff' }} />
           <span>实时调校策略思考链与人设</span>
         </div>
         <div>
@@ -171,10 +171,10 @@ export default function PromptEditorPanel({ apiBase, standalone = true }) {
           <div style={{
             marginTop: '0.6rem',
             padding: '0.5rem 0.75rem',
-            background: 'rgba(239, 68, 68, 0.1)',
-            border: '1px solid rgba(239, 68, 68, 0.3)',
+            background: 'rgba(255, 59, 48, 0.06)',
+            border: '1px solid rgba(255, 59, 48, 0.3)',
             borderRadius: '6px',
-            color: '#F87171',
+            color: '#d70015',
             fontSize: '0.78rem',
             display: 'flex',
             alignItems: 'flex-start',
@@ -238,8 +238,8 @@ export default function PromptEditorPanel({ apiBase, standalone = true }) {
                 padding: '1rem',
                 borderRadius: '8px',
                 resize: 'vertical',
-                background: 'rgba(15, 23, 42, 0.85)',
-                color: '#E2E8F0',
+                background: 'rgba(255, 255, 255, 0.7)',
+                color: '#1d1d1f',
                 border: '1px solid var(--border-color)',
                 boxSizing: 'border-box',
                 whiteSpace: 'pre-wrap',
@@ -260,7 +260,7 @@ export default function PromptEditorPanel({ apiBase, standalone = true }) {
                 字符数: <strong style={{ color: 'var(--text-bright)' }}>{charCount}</strong> | 行数: <strong style={{ color: 'var(--text-bright)' }}>{lineCount}</strong>
               </div>
               <div>
-                状态: {promptIsCustom ? <span style={{ color: '#F59E0B' }}>自定义覆盖文件生效中 (feiyang_prompt.txt)</span> : <span style={{ color: '#10B981' }}>内置默认代码 Prompt 生效中</span>}
+                状态: {promptIsCustom ? <span style={{ color: '#b25000' }}>自定义覆盖文件生效中 (feiyang_prompt.txt)</span> : <span style={{ color: '#248a3d' }}>内置默认代码 Prompt 生效中</span>}
               </div>
             </div>
           </>

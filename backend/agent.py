@@ -51,8 +51,8 @@ class FeiyangAgent:
         self._system_prompt = system_prompt
         self.root_dir = root_dir
         
-        # Dynamically load min_confidence from trades.json config block, fallback to 7
-        self.min_confidence = 7
+        # Dynamically load min_confidence from trades.json config block, fallback to 6
+        self.min_confidence = 6
         if root_dir:
             trades_path = os.path.join(root_dir, "trades.json")
             if os.path.exists(trades_path):
@@ -110,7 +110,7 @@ class FeiyangAgent:
   * Fear & Greed >= 85 且趋势 rising → 警惕过热，做空信号加分，做多信号减分
   * Fear & Greed <= 15 且趋势 falling → 警惕恐慌，做多信号加分，做空信号减分
   * 资金费率 > 0.05% → 多头拥挤，回调风险增大；< -0.05% → 空头拥挤，反弹风险增大
-  * 有 critical 宏观事件在 12h 内 → 置信度上限 6 分（强制 wait）
+  * 有 critical 宏观事件在 12h 内 → 置信度上限 5 分（低于出信号门槛，自然观望）
 
 **第 1 步：市场状态判定 (Market Regime)**
 - 读取 payload 中的 market_regime 字段（若存在）。
@@ -127,9 +127,9 @@ class FeiyangAgent:
 
 **第 3 步：乖离率检查 (Anti-Chase Filter)**
 - 计算 4H 收盘价与 MA5 的偏离百分比：deviation = (close - MA5) / MA5 * 100
-- 若 deviation > 2%（或 > 1.5 * ATR_14 / close * 100）且未伴随大成交量强力突破阻力位 → 视为正偏离过大，禁止追多
-- 若 deviation < -2%（或 < -1.5 * ATR_14 / close * 100）且未伴随大成交量强力跌破支撑位 → 视为负偏离过大，禁止追空
-- 此步骤是硬性过滤器，不通过则直接 wait。
+- 若 deviation > 3%（或 > 2.0 * ATR_14 / close * 100）且未伴随大成交量强力突破阻力位 → 视为正偏离过大，禁止追多
+- 若 deviation < -3%（或 < -2.0 * ATR_14 / close * 100）且未伴随大成交量强力跌破支撑位 → 视为负偏离过大，禁止追空
+- 此步骤是硬性过滤器，不通过则直接 wait。注意：偏离在 3% 以内属于正常波动范围，不应阻止信号。
 
 **第 4 步：关键位共振定位 (Confluence Zone)**
 - 从 nearby_key_levels 中找到距当前价格最近的支撑/阻力位。
@@ -168,16 +168,20 @@ class FeiyangAgent:
 - 硬性规则：R:R < 1.5 → 必须输出 wait，无论其他条件多好。
 
 **第 7 步：综合评分与信号输出**
-- 评分标准（满分 10 分）：
-  * 大周期方向一致 +2
-  * 关键位共振 >= 2 个 +2
-  * 动能确认明确 +2
-  * R:R >= 2.0 +2
-  * 市场状态适配（顺势）+1
-  * 量价配合（OBV 确认）+1
-- 评分 < 7 → 必须输出 wait
-- 评分 7-8 → 标准信号
-- 评分 9-10 → 高置信度信号（可适当放宽入场区间）
+- 评分标准（满分 12 分）：
+  * 大周期方向一致（1W+1D 同向）+2；仅 1D 方向明确 +1
+  * 关键位共振 >= 2 个 +2；共振 = 1 个 +1
+  * 动能确认明确（>= 2 项确认）+2；仅 1 项确认 +1
+  * R:R >= 2.0 +2；R:R >= 1.5 +1
+  * 市场状态适配（顺势交易）+1
+  * 量价配合（OBV 确认或成交量异动方向一致）+1
+  * 结构清晰度加分：价格精确触及关键支撑/阻力位（误差 < 0.5*ATR）+1
+  * 震荡区间加分：ADX < 20 时，价格触及布林带轨线 + KDJ 超买/超卖 +1
+- 评分 < 6 → 必须输出 wait
+- 评分 6-7 → 标准信号（正常仓位）
+- 评分 8-9 → 高置信度信号（可适当放宽入场区间）
+- 评分 10+ → 极高置信度信号
+- 重要：不要因为"不够完美"就给 wait。只要满足 2 个共振 + 1 个动能确认 + R:R >= 1.5，就应该输出信号。完美交易极少出现，6 分以上的机会就值得参与。
 
 ═══════════════════════════════════════
 【输出格式 — 严格遵守】
@@ -206,7 +210,7 @@ class FeiyangAgent:
 
 字段说明：
 - signal_type: 严格限制为 "long" / "short" / "wait"
-- confidence_score: 1-10（< 7 必须输出 wait）
+- confidence_score: 1-12（< 6 必须输出 wait）
 - market_regime: "trending_up" / "trending_down" / "ranging" / "volatile"
 - entry_type: "limit"（挂单等待回踩）/ "market"（价格已在区间内可即时成交）
 - entry_zone: 入场价格区间 [min, max]
@@ -224,27 +228,44 @@ class FeiyangAgent:
 ═══════════════════════════════════════
 【Markdown 报告格式】
 ═══════════════════════════════════════
-在 JSON 块后空一行，输出飞扬口吻报告，必须强制包含【判定依据与共振因子】板块，清晰透明地展示哪些技术条件达标、哪些条件不达标：
+在 JSON 块后空一行，输出飞扬口吻报告。结构顺序：先给结论和交易计划，最后附评分明细表解释"这个分怎么来的、为什么是这个方向"。
 
 ### 飞扬盯盘警报：[SYMBOL] (当前价格: $[PRICE])
 
 **盘面诊断**：
-[犀利分析：市场状态、大周期方向、乖离率、关键位共振、动能信号]
+[2-3句犀利总结：当前市场状态、主方向、核心矛盾是什么]
 
-**判定依据与共振因子（条件核对清单）**：
-- [ ] **大周期定调 (1W/1D EMA55 & MACD)**：[描述主趋势是顺势还是逆势，方向是否共振]
-- [ ] **关键位共振 (Fib/EMA/布林带/前期高低点/VWAP)**：[列出达标的具体关键位，必须满足至少 2 个共振点]
-- [ ] **乖离率过滤 (4H MA5 偏离度)**：[说明当前是否偏离过大，是否有空间]
-- [ ] **动能确认信号 (RSI底/顶背离、KDJ金叉/死叉、MACD柱状图缩短或站稳均线)**：[描述哪些小周期动能指标已给出入场背离或金叉/死叉确认]
-- [ ] **盈亏比过滤器 (R:R >= 1.5)**：[列出入场、止损与目标位计算出的真实盈亏比是否符合要求]
-*(注：请在上述清单前使用 markdown 格式 `[x]` 表示该项已完全满足共振或过滤要求，`[ ]` 表示该项条件不达标或属于违禁违规点。)*
-
-**交易逻辑**：
-- 信号方向：[埋伏低多 / 高空埋伏 / 观望静待] (评分: X/10, R:R: X:1)
-- 埋伏区间：$[MIN] - $[MAX]（共振依据）
-- 防守底线：$[SL] (ATR 缓冲 X 点)
+**交易计划**：
+- 方向：[埋伏低多 / 高空埋伏 / 观望静待] | 评分: X/12 | R:R: X.X:1
+- 入场区间：$[MIN] - $[MAX]（依据：[简述为什么是这个区间]）
+- 防守底线：$[SL]（ATR缓冲 X 点）
 - 止盈目标：TP1 $[TP1] (平50%推保本) | TP2 $[TP2]
 - 飞扬叮嘱：[一句接地气的风控寄语]
+
+**方向判定逻辑**：
+[用 2-4 句话解释为什么选择这个方向而不是反向或观望。说清楚核心驱动因素是什么，比如"1D+4H均指向多头结构，价格回踩EMA55获得支撑且RSI底背离确认，所以方向定为低多而非观望"。如果是wait，说清楚卡在哪一步。]
+
+---
+
+**评分明细（本单得分拆解）**：
+
+| 评分项 | 达标情况 | 得分 |
+|--------|----------|------|
+| 大周期方向（1W+1D同向+2 / 仅1D+1） | [具体描述：如"1D EMA55上方+MACD金叉，1W也在EMA55上方，同向"] | +X |
+| 关键位共振（>=2个+2 / 1个+1） | [列出具体共振点：如"Fib0.618($XX) + 4H EMA55($XX) + 布林下轨($XX)"] | +X |
+| 动能确认（>=2项+2 / 1项+1） | [列出具体信号：如"RSI从38回升 + MACD柱连续3根缩短"] | +X |
+| 盈亏比（>=2.0+2 / >=1.5+1） | [实际计算：Entry $XX, SL $XX, TP1 $XX → R:R = X.X] | +X |
+| 顺势适配 | [如"ADX=28上升趋势中做多，顺势"] | +X |
+| 量价配合 | [如"OBV未创新低，量价背离确认" 或 "无明显量价配合"] | +X |
+| 结构清晰度（触及关键位误差<0.5ATR） | [如"当前价距支撑位仅0.2ATR" 或 "距关键位较远"] | +X |
+| 震荡区间加分（ADX<20+BB轨+KDJ） | [如"ADX=16震荡市，价格触及布林下轨+KDJ超卖" 或 "不适用"] | +X |
+| **合计** | | **X/12** |
+
+*过滤项检查（任一不通过则强制wait）*：
+- 乖离率：4H MA5偏离 X%（阈值±3%）→ [通过/未通过]
+- 极端波动：4H ATR vs 20期均值 = X倍（阈值2.5x）→ [通过/未通过]
+- 宏观事件：[无近期事件 / 距XX事件还有Xh] → [通过/未通过]
+- 极端情绪：F&G = X（阈值>=90禁追多/<=10禁追空）→ [通过/未通过]
 """
 
     # Model-specific prompt suffixes for better compatibility
@@ -283,7 +304,7 @@ class FeiyangAgent:
             f"当前价格: ${payload.get('current_price', 'N/A')}\n"
             f"市场状态: {payload.get('market_regime', {}).get('regime', 'N/A') if isinstance(payload.get('market_regime'), dict) else 'N/A'}\n\n"
             f"完整数据 Payload:\n{user_prompt}\n\n"
-            f"请严格按照 7 步推演链分析，输出 JSON 信号块 + Markdown 报告。"
+            f"请严格按照 8 步推演链分析，输出 JSON 信号块 + Markdown 报告。"
         )
 
         logger.info(f"Sending request to LLM ({self.model_name})...")
@@ -399,6 +420,20 @@ class FeiyangAgent:
         # Normalize signal fields
         json_signal = self._normalize_signal(json_signal)
 
+        # Reconcile confidence_score with the markdown scoring table total
+        # The table's "合计" row is the ground truth (LLM sometimes mismatches JSON vs table)
+        if markdown_part:
+            score_match = re.search(r"合计[^\d]*(\d+)\s*/\s*12", markdown_part)
+            if score_match:
+                table_score = int(score_match.group(1))
+                json_score = json_signal.get("confidence_score", 0)
+                if table_score != json_score:
+                    logger.info(
+                        f"[ScoreSync] JSON confidence_score={json_score} but table 合计={table_score}. "
+                        f"Overriding JSON to match table."
+                    )
+                    json_signal["confidence_score"] = table_score
+
         # Perform logical checks
         self._validate_signal(json_signal, current_price)
 
@@ -410,6 +445,20 @@ class FeiyangAgent:
         signal.setdefault("market_regime", "unknown")
         signal.setdefault("entry_type", "limit")
         signal.setdefault("confluence_factors", [])
+
+        # Normalize signal_class (trade subtype)
+        valid_classes = ("pullback_long", "pullback_short", "breakout_long", "breakout_short", "wait")
+        sig_class = str(signal.get("signal_class") or "").lower().strip()
+        if sig_class not in valid_classes:
+            # Infer from signal_type if LLM didn't provide it
+            sig_type_raw = str(signal.get("signal_type") or "").lower().strip()
+            if sig_type_raw == "long":
+                sig_class = "pullback_long"
+            elif sig_type_raw == "short":
+                sig_class = "pullback_short"
+            else:
+                sig_class = "wait"
+        signal["signal_class"] = sig_class
 
         # Normalize signal_type (guard against null from LLM)
         sig = str(signal.get("signal_type") or "").lower().strip()
@@ -428,6 +477,35 @@ class FeiyangAgent:
         if signal["confidence_score"] < self.min_confidence and signal["signal_type"] != "wait":
             logger.info(f"Confidence {signal['confidence_score']} < {self.min_confidence}, forcing wait.")
             signal["signal_type"] = "wait"
+
+        # Safety net: LLM said "wait" but score >= threshold AND provided valid trade geometry
+        # This catches the contradiction where the report describes a trade but JSON says wait
+        # BUT: do NOT override if a legitimate hard filter (R:R < 1.5) blocked the signal
+        if signal["signal_type"] == "wait" and signal["confidence_score"] >= self.min_confidence:
+            entry_zone = signal.get("entry_zone", {}) or {}
+            entry_min = entry_zone.get("min", 0)
+            entry_max = entry_zone.get("max", 0)
+            sl = signal.get("stop_loss", 0)
+            tps = signal.get("take_profit_targets", []) or []
+            tp1 = tps[0] if tps else 0
+            rr = float(signal.get("risk_reward_ratio", 0) or 0)
+
+            # Check if there's valid non-zero trade geometry AND R:R passes the hard filter
+            if entry_min > 0 and entry_max > 0 and sl > 0 and tp1 > 0 and rr >= 1.5:
+                if sl < entry_min and tp1 > entry_max:
+                    signal["signal_type"] = "long"
+                    logger.warning(
+                        f"[ConsistencyFix] LLM output wait with score {signal['confidence_score']} "
+                        f"but valid long geometry (SL={sl} < entry={entry_min}-{entry_max} < TP={tp1}, R:R={rr}). "
+                        f"Overriding to LONG."
+                    )
+                elif sl > entry_max and tp1 < entry_min:
+                    signal["signal_type"] = "short"
+                    logger.warning(
+                        f"[ConsistencyFix] LLM output wait with score {signal['confidence_score']} "
+                        f"but valid short geometry (SL={sl} > entry={entry_min}-{entry_max} > TP={tp1}, R:R={rr}). "
+                        f"Overriding to SHORT."
+                    )
 
         return signal
 
@@ -532,10 +610,32 @@ class FeiyangAgent:
             )
             return final_signal, final_report
         else:
-            # Disagreement → force wait (capital preservation > FOMO)
+            # Disagreement → check if one signal is strong enough to stand alone
+            conf_1 = signal_1.get("confidence_score", 0)
+            conf_2 = signal_2.get("confidence_score", 0)
+            max_conf = max(conf_1, conf_2)
+
+            if max_conf >= 7:
+                # One call is highly confident — trust it (reduce score slightly for uncertainty)
+                if conf_1 >= conf_2:
+                    final_signal = signal_1
+                    final_report = report_1
+                else:
+                    final_signal = signal_2
+                    final_report = report_2
+                final_signal["confidence_score"] = max_conf - 1  # Penalize 1 point for lack of consensus
+                final_signal["consensus"] = False
+                logger.info(
+                    f"[Consensus] DISAGREEMENT but high-confidence override: "
+                    f"call1={sig_type_1}(conf={conf_1}) vs call2={sig_type_2}(conf={conf_2}) "
+                    f"→ using {final_signal['signal_type']} with conf={final_signal['confidence_score']}"
+                )
+                return final_signal, final_report
+
+            # Both calls low confidence → force wait
             logger.info(
-                f"[Consensus] DISAGREEMENT: call1={sig_type_1} vs call2={sig_type_2} → forcing wait. "
-                f"Ambiguous market conditions, better to miss than lose."
+                f"[Consensus] DISAGREEMENT: call1={sig_type_1}(conf={conf_1}) vs call2={sig_type_2}(conf={conf_2}) "
+                f"→ both below 7, forcing wait. Ambiguous market conditions."
             )
             wait_signal = {
                 "symbol": payload.get("symbol", "UNKNOWN"),
@@ -550,12 +650,12 @@ class FeiyangAgent:
                 "risk_reward_ratio": 0,
                 "confluence_factors": [],
                 "consensus": False,
-                "core_reason": f"双次诊断方向不一致（{sig_type_1} vs {sig_type_2}），市场信号模糊，观望等待更明确共振。"
+                "core_reason": f"双次诊断方向不一致（{sig_type_1} vs {sig_type_2}），且置信度均不足，观望等待更明确共振。"
             }
             combined_report = (
                 f"### 飞扬盯盘警报：{payload.get('symbol', 'UNKNOWN')} — 双次诊断不一致，观望\n\n"
-                f"**诊断结果**：第一次诊断给出 {sig_type_1.upper()} 信号，第二次诊断给出 {sig_type_2.upper()} 信号。\n"
-                f"方向不一致说明当前市场信号模糊，兄弟们别急，等市场给出更明确的方向再动手。\n\n"
+                f"**诊断结果**：第一次诊断给出 {sig_type_1.upper()} 信号（置信度 {conf_1}），第二次诊断给出 {sig_type_2.upper()} 信号（置信度 {conf_2}）。\n"
+                f"方向不一致且置信度不足，兄弟们别急，等市场给出更明确的方向再动手。\n\n"
                 f"---\n*以下为第一次诊断参考：*\n\n{report_1}"
             )
             return wait_signal, combined_report

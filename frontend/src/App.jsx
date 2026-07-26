@@ -306,7 +306,7 @@ export default function App() {
             className={`btn btn-secondary ${activeTab === 'prompt' ? 'active' : ''}`}
             onClick={() => setActiveTab('prompt')}
           >
-            <Brain size={16} className="text-amber-400" style={{ color: '#F59E0B' }} />
+            <Brain size={16} style={{ color: '#b25000' }} />
             <span>🧠 策略 Prompt</span>
           </button>
           <button
@@ -396,7 +396,7 @@ export default function App() {
                 <div 
                   className="monitor-logs-panel"
                   style={{
-                    borderTop: '1px solid rgba(255,255,255,0.06)',
+                    borderTop: '1px solid rgba(0,0,0,0.06)',
                     paddingTop: '0.75rem',
                     marginTop: '0.75rem',
                     height: '160px',
@@ -443,7 +443,7 @@ export default function App() {
                         borderRadius: '4px',
                         height: 'auto',
                         minHeight: 'unset',
-                        border: '1px solid rgba(255,255,255,0.08)'
+                        border: '1px solid rgba(0,0,0,0.08)'
                       }}
                     >
                       清空日志
@@ -453,22 +453,22 @@ export default function App() {
                     ref={logConsoleRef}
                     style={{
                       flex: 1,
-                      background: 'rgba(0,0,0,0.3)',
-                      border: '1px solid rgba(255,255,255,0.04)',
+                      background: 'rgba(0,0,0,0.03)',
+                      border: '1px solid rgba(0,0,0,0.05)',
                       borderRadius: '6px',
                       padding: '0.5rem 0.75rem',
                       overflowY: 'auto',
                       fontFamily: 'Consolas, Monaco, monospace',
                       fontSize: '0.8rem',
                       lineHeight: '1.4',
-                      color: '#81c784',
+                      color: '#248a3d',
                     }}
                   >
                     {monitorLogs.map((log, idx) => {
-                      let color = '#81c784';
+                      let color = '#248a3d';
                       if (log.includes('❌') || log.includes('失败')) color = 'var(--color-short)';
-                      if (log.includes('⚡') || log.includes('手动')) color = '#64b5f6';
-                      if (log.includes('🔄') || log.includes('启动')) color = '#ffb74d';
+                      if (log.includes('⚡') || log.includes('手动')) color = '#007aff';
+                      if (log.includes('🔄') || log.includes('启动')) color = '#b25000';
                       if (log.includes('✅') || log.includes('成功')) color = 'var(--color-long)';
                       if (log.includes('😴') || log.includes('休眠')) color = 'var(--text-muted)';
                       
@@ -491,23 +491,24 @@ export default function App() {
             {/* Right Side: Prediction & Feiyang Console */}
             <section className="column-right">
               {/* Diagnose Trigger Panel */}
-              <div className="panel">
-                <div className="panel-header" style={{ marginBottom: '0.5rem', borderBottom: 'none', paddingBottom: 0, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <div className="panel-title">
-                    <span>💡 飞扬交易决策台</span>
+              <div className="panel" style={{ flexShrink: 0 }}>
+                <div className="panel-header" style={{ marginBottom: '0.5rem', borderBottom: 'none', paddingBottom: 0, display: 'flex', justifyContent: 'space-between', alignItems: 'center', lineHeight: 'normal' }}>
+                  <div className="panel-title" style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', lineHeight: 'normal' }}>
+                    <span style={{ fontSize: '1.1rem', display: 'inline-flex', alignItems: 'center' }}>💡</span>
+                    <span style={{ display: 'inline-flex', alignItems: 'center' }}>飞扬交易决策台</span>
                   </div>
                   <button
                     type="button"
                     className="btn btn-secondary"
-                    style={{ fontSize: '0.75rem', padding: '0.2rem 0.55rem', display: 'flex', alignItems: 'center', gap: '0.3rem' }}
+                    style={{ fontSize: '0.75rem', padding: '0.25rem 0.6rem', display: 'inline-flex', alignItems: 'center', gap: '0.3rem', lineHeight: 'normal' }}
                     onClick={() => setActiveTab('prompt')}
                     title="自定义与调校 Prompt 人设规则"
                   >
-                    <Brain size={13} style={{ color: '#F59E0B' }} />
+                    <Brain size={13} style={{ color: '#b25000' }} />
                     <span>策略 Prompt</span>
                   </button>
                 </div>
-                <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginBottom: '1rem' }}>
+                <p style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', marginBottom: '1rem', lineHeight: '1.5' }}>
                   模拟大局观（多周期共振、阻力验证、拒绝追涨），提取精炼指标由 LLM 分析产生右侧防守买卖信号。
                 </p>
                 <button 
@@ -556,15 +557,32 @@ export default function App() {
                 ) : prediction ? (
                   <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflowY: 'auto' }}>
                     {/* Signal Block */}
-                    <div className={`signal-box ${prediction.signal.signal_type}`}>
-                      <div className="signal-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                        <div className={`signal-badge ${prediction.signal.signal_type}`}>
-                          {prediction.signal.signal_type === 'long' && '📈 建议买入 (LONG)'}
-                          {prediction.signal.signal_type === 'short' && '📉 建议做空 (SHORT)'}
-                          {prediction.signal.signal_type === 'wait' && '⏳ 建议观望 (WAIT)'}
+                    <div className={`signal-box ${prediction.signal.signal_type}`} style={{ flexShrink: 0 }}>
+                      <div className="signal-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', lineHeight: 'normal' }}>
+                        <div className={`signal-badge ${prediction.signal.signal_type}`} style={{ display: 'inline-flex', alignItems: 'center', gap: '0.4rem', lineHeight: 'normal' }}>
+                          <span style={{ fontSize: '1.25rem', display: 'inline-flex', alignItems: 'center' }}>
+                            {prediction.signal.signal_type === 'long' && '📈'}
+                            {prediction.signal.signal_type === 'short' && '📉'}
+                            {prediction.signal.signal_type === 'wait' && '⏳'}
+                          </span>
+                          <span style={{ display: 'inline-flex', alignItems: 'center' }}>
+                            {prediction.signal.signal_type === 'long' && '建议买入 (LONG)'}
+                            {prediction.signal.signal_type === 'short' && '建议做空 (SHORT)'}
+                            {prediction.signal.signal_type === 'wait' && '建议观望 (WAIT)'}
+                          </span>
+                          {prediction.signal.signal_class && prediction.signal.signal_class !== 'wait' && (
+                            <span style={{ fontSize: '0.75rem', marginLeft: '0.5rem', opacity: 0.8, display: 'inline-flex', alignItems: 'center' }}>
+                              {prediction.signal.signal_class === 'pullback_long' && '埋伏低多'}
+                              {prediction.signal.signal_class === 'pullback_short' && '埋伏高空'}
+                              {prediction.signal.signal_class === 'breakout_long' && '合理追多'}
+                              {prediction.signal.signal_class === 'breakout_short' && '合理追空'}
+                            </span>
+                          )}
                         </div>
-                        <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>
-                          置信度评分: <span style={{ color: 'var(--color-warning)', fontWeight: 'bold', fontSize: '1.05rem' }}>{prediction.signal.confidence_score}</span> / 10
+                        <div style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', display: 'inline-flex', alignItems: 'center', gap: '0.2rem', lineHeight: 'normal' }}>
+                          <span>置信度评分:</span>
+                          <span style={{ color: '#b25000', fontWeight: 'bold', fontSize: '1.05rem', display: 'inline-flex', alignItems: 'center' }}>{prediction.signal.confidence_score}</span>
+                          <span>/ 12</span>
                         </div>
                       </div>
                       
@@ -593,13 +611,13 @@ export default function App() {
                         </div>
                       ) : (
                         <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
-                          当前盘面不具备右侧安全盈亏比，别急着追，老实等待回踩，君子不立危墙之下！
+                          {prediction.signal.core_reason || '当前盘面不具备右侧安全盈亏比，别急着追，老实等待回踩，君子不立危墙之下！'}
                         </p>
                       )}
                     </div>
 
                     {/* Markdown Report Render */}
-                    <div style={{ flex: 1, borderTop: '1px solid rgba(255,255,255,0.05)', paddingTop: '1rem' }}>
+                    <div style={{ flex: 1, borderTop: '1px solid rgba(0,0,0,0.05)', paddingTop: '1rem' }}>
                       {renderMarkdown(prediction.report)}
                     </div>
                   </div>

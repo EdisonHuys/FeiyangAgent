@@ -204,7 +204,7 @@ def process_signal_evaluation(symbol: str, payload: dict, json_signal: dict, mar
     if sig_type == "wait":
         last_signals[symbol] = {"signal_type": "wait"}
         save_signals_state(last_signals)
-        log_monitor_event(f"✅ [{source_tag}] {symbol} 诊断完成。交易决策：WAIT (观望等待)，当前价：${current_price}，置信度：{conf}/10。已静默不发送推送。")
+        log_monitor_event(f"✅ [{source_tag}] {symbol} 诊断完成。交易决策：WAIT (观望等待)，当前价：${current_price}，置信度：{conf}/12。已静默不发送推送。")
         return
 
     if sig_type in ["long", "short"]:
@@ -283,7 +283,7 @@ def process_signal_evaluation(symbol: str, payload: dict, json_signal: dict, mar
                     f"🚨 *[{source_tag}警报] {symbol} {emoji}*\n"
                     f"📌 触发依据：{push_reason}\n"
                     f"🔥 交易信号：{sig_label}\n"
-                    f"🔥 置信度评分：{conf} / 10\n"
+                    f"🔥 置信度评分：{conf} / 12\n"
                     f"----------------------------------------\n"
                     f"📥 合理吃单区间：${lower_entry} - ${upper_entry}\n"
                     f"🛡️ 防守线 (止损)：${sl}\n"
@@ -773,7 +773,7 @@ def run_analysis(req: AnalysisRequest):
         
     sig_label = json_signal.get("signal_type", "wait").upper()
     conf = json_signal.get("confidence_score", 0)
-    log_monitor_event(f"✅ [手动诊断成功] {symbol} 诊断完成。交易决策：{sig_label}，置信度：{conf}/10。")
+    log_monitor_event(f"✅ [手动诊断成功] {symbol} 诊断完成。交易决策：{sig_label}，置信度：{conf}/12。")
         
     return {
         "status": "success",
@@ -929,6 +929,12 @@ class ResetPaperRequest(BaseModel):
 def reset_paper_trading(req: ResetPaperRequest):
     res = sniper_engine.reset_paper_data(req.initial_balance)
     log_monitor_event(f"🗑️ [模拟盘重置成功] 已清空模拟持仓记录，重置初始模拟资金为 ${req.initial_balance} USD！")
+    return res
+
+@app.post("/api/sniper/reset-live")
+def reset_live_trading(req: ResetPaperRequest):
+    res = sniper_engine.reset_live_data(req.initial_balance)
+    log_monitor_event(f"🗑️ [实盘统计清空] 已清空实盘交易记录，重置 live 账户基准为 ${req.initial_balance} USD！")
     return res
 
 @app.post("/api/sniper/reset-breaker")

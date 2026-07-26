@@ -116,7 +116,7 @@ export default function BacktestPanel({ apiBase, symbols = [] }) {
     ctx.clearRect(0, 0, W, H);
 
     if (curve.length < 2) {
-      ctx.fillStyle = '#64748B';
+      ctx.fillStyle = '#86868b';
       ctx.font = '13px sans-serif';
       ctx.textAlign = 'center';
       ctx.fillText('暂无多笔成交数据，平仓后将自动绘制权益曲线', W / 2, H / 2);
@@ -133,7 +133,7 @@ export default function BacktestPanel({ apiBase, symbols = [] }) {
     const y = v => H - 25 - ((v - (min - pad)) / (range + 2 * pad)) * (H - 45);
 
     // Draw grid background lines
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.05)';
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.06)';
     ctx.lineWidth = 1;
     for (let i = 1; i <= 3; i++) {
       const lineY = (H / 4) * i;
@@ -145,7 +145,7 @@ export default function BacktestPanel({ apiBase, symbols = [] }) {
 
     // Baseline (initial balance)
     const baseLineY = y(result.initial_balance);
-    ctx.strokeStyle = 'rgba(245, 158, 11, 0.4)';
+    ctx.strokeStyle = 'rgba(255, 149, 0, 0.4)';
     ctx.setLineDash([4, 4]);
     ctx.beginPath();
     ctx.moveTo(20, baseLineY);
@@ -157,11 +157,11 @@ export default function BacktestPanel({ apiBase, symbols = [] }) {
     const finalUp = values[values.length - 1] >= result.initial_balance;
     const gradient = ctx.createLinearGradient(0, 0, 0, H);
     if (finalUp) {
-      gradient.addColorStop(0, 'rgba(16, 185, 129, 0.25)');
-      gradient.addColorStop(1, 'rgba(16, 185, 129, 0.0)');
+      gradient.addColorStop(0, 'rgba(52, 199, 89, 0.25)');
+      gradient.addColorStop(1, 'rgba(52, 199, 89, 0.0)');
     } else {
-      gradient.addColorStop(0, 'rgba(239, 68, 68, 0.25)');
-      gradient.addColorStop(1, 'rgba(239, 68, 68, 0.0)');
+      gradient.addColorStop(0, 'rgba(255, 59, 48, 0.25)');
+      gradient.addColorStop(1, 'rgba(255, 59, 48, 0.0)');
     }
 
     ctx.beginPath();
@@ -174,7 +174,7 @@ export default function BacktestPanel({ apiBase, symbols = [] }) {
     ctx.fill();
 
     // Equity Line
-    ctx.strokeStyle = finalUp ? '#10B981' : '#EF4444';
+    ctx.strokeStyle = finalUp ? '#34c759' : '#ff3b30';
     ctx.lineWidth = 2.5;
     ctx.beginPath();
     curve.forEach((p, i) => {
@@ -187,15 +187,15 @@ export default function BacktestPanel({ apiBase, symbols = [] }) {
     curve.forEach((p, i) => {
       ctx.beginPath();
       ctx.arc(x(i), y(p.equity), 3.5, 0, Math.PI * 2);
-      ctx.fillStyle = finalUp ? '#10B981' : '#EF4444';
+      ctx.fillStyle = finalUp ? '#34c759' : '#ff3b30';
       ctx.fill();
-      ctx.strokeStyle = '#0F172A';
+      ctx.strokeStyle = '#ffffff';
       ctx.lineWidth = 1.5;
       ctx.stroke();
     });
 
     // Min & Max Labels
-    ctx.fillStyle = '#94A3B8';
+    ctx.fillStyle = '#86868b';
     ctx.font = '11px monospace';
     ctx.textAlign = 'left';
     ctx.fillText(`最高点: $${max.toFixed(2)}`, 30, 20);
@@ -210,25 +210,25 @@ export default function BacktestPanel({ apiBase, symbols = [] }) {
     <div className="sniper-container" style={{ gap: '1.25rem' }}>
       {/* 1. Header Banner */}
       <div className="sniper-header" style={{
-        background: 'linear-gradient(135deg, rgba(15, 23, 42, 0.9), rgba(30, 41, 59, 0.7))',
-        border: '1px solid rgba(6, 182, 212, 0.25)',
+        background: 'rgba(255, 255, 255, 0.65)',
+        border: '1px solid rgba(0, 122, 255, 0.2)',
         borderRadius: '12px',
         padding: '1.25rem 1.5rem',
-        boxShadow: '0 8px 32px rgba(0, 0, 0, 0.3)',
+        boxShadow: '0 4px 24px rgba(0, 0, 0, 0.08)',
         backdropFilter: 'blur(12px)'
       }}>
         <div className="sniper-header-left">
           <div className="sniper-icon-badge" style={{
-            background: 'rgba(6, 182, 212, 0.12)',
-            border: '1px solid rgba(6, 182, 212, 0.3)',
-            color: '#06B6D4'
+            background: 'rgba(0, 122, 255, 0.08)',
+            border: '1px solid rgba(0, 122, 255, 0.2)',
+            color: '#007aff'
           }}>
             <History size={26} />
           </div>
           <div className="sniper-title-box">
             <div className="sniper-title-row" style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
               <h2 className="sniper-title" style={{ fontSize: '1.25rem', fontWeight: 800 }}>📈 历史回测实验室</h2>
-              <span className="badge-tag" style={{ background: 'rgba(6, 182, 212, 0.12)', color: '#06B6D4', borderColor: 'rgba(6, 182, 212, 0.3)' }}>
+              <span className="badge-tag" style={{ background: 'rgba(0, 122, 255, 0.08)', color: '#007aff', borderColor: 'rgba(0, 122, 255, 0.2)' }}>
                 WALK-FORWARD 逐根回放
               </span>
             </div>
@@ -243,9 +243,9 @@ export default function BacktestPanel({ apiBase, symbols = [] }) {
       <div style={{
         padding: '0.85rem 1.25rem',
         borderRadius: '10px',
-        background: 'rgba(245, 158, 11, 0.06)',
-        border: '1px solid rgba(245, 158, 11, 0.25)',
-        color: '#F59E0B',
+        background: 'rgba(255, 149, 0, 0.05)',
+        border: '1px solid rgba(255, 149, 0, 0.2)',
+        color: '#b25000',
         fontSize: '0.82rem',
         display: 'flex',
         alignItems: 'center',
@@ -261,7 +261,7 @@ export default function BacktestPanel({ apiBase, symbols = [] }) {
       {/* 3. Parameter Controls Form Panel */}
       <div className="panel" style={{ padding: '1.25rem' }}>
         <div style={{ fontSize: '0.92rem', fontWeight: 700, color: 'var(--text-bright)', marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-          <Filter size={16} style={{ color: '#06B6D4' }} />
+          <Filter size={16} style={{ color: '#007aff' }} />
           <span>回测实验室参数配置</span>
         </div>
 
@@ -274,7 +274,7 @@ export default function BacktestPanel({ apiBase, symbols = [] }) {
               onChange={e => setForm({ ...form, symbol: e.target.value })}
               className="form-control"
               disabled={running}
-              style={{ background: 'rgba(15, 23, 42, 0.8)', borderColor: 'var(--border-color)' }}
+              style={{ background: 'rgba(255, 255, 255, 0.6)', borderColor: 'var(--border-color)' }}
             >
               {(symbols.length ? symbols : [form.symbol]).map(s => <option key={s} value={s}>{s}</option>)}
             </select>
@@ -291,7 +291,7 @@ export default function BacktestPanel({ apiBase, symbols = [] }) {
               disabled={running}
               onChange={e => setForm({ ...form, days: Math.max(1, parseInt(e.target.value) || 1) })}
               className="form-control"
-              style={{ background: 'rgba(15, 23, 42, 0.8)', borderColor: 'var(--border-color)' }}
+              style={{ background: 'rgba(255, 255, 255, 0.6)', borderColor: 'var(--border-color)' }}
             />
           </div>
 
@@ -306,7 +306,7 @@ export default function BacktestPanel({ apiBase, symbols = [] }) {
               disabled={running}
               onChange={e => setForm({ ...form, step_hours: Math.max(1, parseInt(e.target.value) || 1) })}
               className="form-control"
-              style={{ background: 'rgba(15, 23, 42, 0.8)', borderColor: 'var(--border-color)' }}
+              style={{ background: 'rgba(255, 255, 255, 0.6)', borderColor: 'var(--border-color)' }}
             />
           </div>
 
@@ -321,7 +321,7 @@ export default function BacktestPanel({ apiBase, symbols = [] }) {
               disabled={running}
               onChange={e => setForm({ ...form, max_llm_calls: Math.max(1, parseInt(e.target.value) || 1) })}
               className="form-control"
-              style={{ background: 'rgba(15, 23, 42, 0.8)', borderColor: 'var(--border-color)' }}
+              style={{ background: 'rgba(255, 255, 255, 0.6)', borderColor: 'var(--border-color)' }}
             />
           </div>
 
@@ -335,7 +335,7 @@ export default function BacktestPanel({ apiBase, symbols = [] }) {
               disabled={running}
               onChange={e => setForm({ ...form, initial_balance: Math.max(10, parseFloat(e.target.value) || 10000) })}
               className="form-control"
-              style={{ background: 'rgba(15, 23, 42, 0.8)', borderColor: 'var(--border-color)' }}
+              style={{ background: 'rgba(255, 255, 255, 0.6)', borderColor: 'var(--border-color)' }}
             />
           </div>
 
@@ -352,7 +352,7 @@ export default function BacktestPanel({ apiBase, symbols = [] }) {
                   alignItems: 'center',
                   justifyContent: 'center',
                   gap: '0.5rem',
-                  background: 'linear-gradient(135deg, #06B6D4, #2563EB)',
+                  background: 'linear-gradient(135deg, #007aff, #5856d6)',
                   fontWeight: 700,
                   fontSize: '0.88rem'
                 }}
@@ -371,8 +371,8 @@ export default function BacktestPanel({ apiBase, symbols = [] }) {
                   alignItems: 'center',
                   justifyContent: 'center',
                   gap: '0.5rem',
-                  color: '#EF4444',
-                  borderColor: 'rgba(239, 68, 68, 0.4)',
+                  color: '#d70015',
+                  borderColor: 'rgba(255, 59, 48, 0.25)',
                   fontWeight: 700,
                   fontSize: '0.88rem'
                 }}
@@ -389,18 +389,18 @@ export default function BacktestPanel({ apiBase, symbols = [] }) {
           <div style={{ marginTop: '1.25rem', paddingTop: '1rem', borderTop: '1px solid var(--border-color)' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.82rem', color: 'var(--text-bright)', marginBottom: '0.4rem' }}>
               <span style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-                <RefreshCw size={14} className="spinner" style={{ color: '#06B6D4' }} />
+                <RefreshCw size={14} className="spinner" style={{ color: '#007aff' }} />
                 <span>{status.message || '正在逐根回放历史 K 线...'}</span>
               </span>
-              <strong style={{ color: '#06B6D4' }}>{status.progress_pct}%</strong>
+              <strong style={{ color: '#007aff' }}>{status.progress_pct}%</strong>
             </div>
-            <div style={{ height: '8px', borderRadius: '4px', background: 'rgba(15, 23, 42, 0.8)', overflow: 'hidden', border: '1px solid var(--border-color)' }}>
+            <div style={{ height: '8px', borderRadius: '4px', background: 'rgba(255, 255, 255, 0.6)', overflow: 'hidden', border: '1px solid var(--border-color)' }}>
               <div style={{
                 height: '100%',
                 width: `${status.progress_pct}%`,
-                background: 'linear-gradient(90deg, #06B6D4, #10B981)',
+                background: 'linear-gradient(90deg, #007aff, #34c759)',
                 transition: 'width 0.4s ease',
-                boxShadow: '0 0 12px rgba(6, 182, 212, 0.5)'
+                boxShadow: '0 0 12px rgba(0, 122, 255, 0.4)'
               }}></div>
             </div>
           </div>
@@ -408,7 +408,7 @@ export default function BacktestPanel({ apiBase, symbols = [] }) {
 
         {/* Error message */}
         {error && (
-          <div style={{ marginTop: '1rem', padding: '0.75rem', borderRadius: '6px', background: 'rgba(239, 68, 68, 0.1)', border: '1px solid rgba(239, 68, 68, 0.3)', color: '#F87171', fontSize: '0.82rem' }}>
+          <div style={{ marginTop: '1rem', padding: '0.75rem', borderRadius: '6px', background: 'rgba(255, 59, 48, 0.06)', border: '1px solid rgba(255, 59, 48, 0.2)', color: '#d70015', fontSize: '0.82rem' }}>
             ❌ {error}
           </div>
         )}
@@ -420,14 +420,14 @@ export default function BacktestPanel({ apiBase, symbols = [] }) {
           <div className="sniper-grid">
             {/* Net Profit */}
             <div className="sniper-card" style={{
-              background: 'linear-gradient(135deg, rgba(15, 23, 42, 0.8), rgba(30, 41, 59, 0.6))',
-              border: `1px solid ${result.net_profit_usd >= 0 ? 'rgba(16, 185, 129, 0.3)' : 'rgba(239, 68, 68, 0.3)'}`
+              background: 'rgba(255, 255, 255, 0.55)',
+              border: `1px solid ${result.net_profit_usd >= 0 ? 'rgba(52, 199, 89, 0.25)' : 'rgba(255, 59, 48, 0.25)'}`
             }}>
               <div className="sniper-card-header">
                 <span>回测净收益</span>
-                <TrendingUp size={18} style={{ color: result.net_profit_usd >= 0 ? '#10B981' : '#EF4444' }} />
+                <TrendingUp size={18} style={{ color: result.net_profit_usd >= 0 ? '#248a3d' : '#d70015' }} />
               </div>
-              <div className="sniper-card-val" style={{ color: result.net_profit_usd >= 0 ? '#10B981' : '#EF4444', fontSize: '1.4rem' }}>
+              <div className="sniper-card-val" style={{ color: result.net_profit_usd >= 0 ? '#248a3d' : '#d70015', fontSize: '1.4rem' }}>
                 {result.net_profit_usd >= 0 ? '+' : ''}${result.net_profit_usd}
                 <span style={{ fontSize: '0.9rem', marginLeft: '0.4rem', opacity: 0.85 }}>({result.net_profit_percent}%)</span>
               </div>
@@ -438,14 +438,14 @@ export default function BacktestPanel({ apiBase, symbols = [] }) {
 
             {/* Win Rate & Profit Factor */}
             <div className="sniper-card" style={{
-              background: 'linear-gradient(135deg, rgba(15, 23, 42, 0.8), rgba(30, 41, 59, 0.6))',
-              border: '1px solid rgba(245, 158, 11, 0.3)'
+              background: 'rgba(255, 255, 255, 0.55)',
+              border: '1px solid rgba(255, 149, 0, 0.25)'
             }}>
               <div className="sniper-card-header">
                 <span>交易胜率 / 盈亏比 (PF)</span>
-                <Award size={18} style={{ color: '#F59E0B' }} />
+                <Award size={18} style={{ color: '#b25000' }} />
               </div>
-              <div className="sniper-card-val" style={{ color: '#F59E0B', fontSize: '1.4rem' }}>
+              <div className="sniper-card-val" style={{ color: '#b25000', fontSize: '1.4rem' }}>
                 {result.win_rate}%
                 <span style={{ fontSize: '0.9rem', marginLeft: '0.4rem', color: 'var(--text-bright)' }}>/ PF {result.profit_factor}</span>
               </div>
@@ -456,14 +456,14 @@ export default function BacktestPanel({ apiBase, symbols = [] }) {
 
             {/* Max Drawdown */}
             <div className="sniper-card" style={{
-              background: 'linear-gradient(135deg, rgba(15, 23, 42, 0.8), rgba(30, 41, 59, 0.6))',
-              border: '1px solid rgba(239, 68, 68, 0.3)'
+              background: 'rgba(255, 255, 255, 0.55)',
+              border: '1px solid rgba(255, 59, 48, 0.25)'
             }}>
               <div className="sniper-card-header">
                 <span>最大回撤 (Max DD)</span>
-                <Activity size={18} style={{ color: '#EF4444' }} />
+                <Activity size={18} style={{ color: '#d70015' }} />
               </div>
-              <div className="sniper-card-val" style={{ color: result.max_drawdown_percent > 10 ? '#EF4444' : '#2979FF', fontSize: '1.4rem' }}>
+              <div className="sniper-card-val" style={{ color: result.max_drawdown_percent > 10 ? '#d70015' : '#2979FF', fontSize: '1.4rem' }}>
                 -{result.max_drawdown_percent}%
               </div>
               <div className="sniper-card-sub">
@@ -473,14 +473,14 @@ export default function BacktestPanel({ apiBase, symbols = [] }) {
 
             {/* Cost & LLM Usage */}
             <div className="sniper-card" style={{
-              background: 'linear-gradient(135deg, rgba(15, 23, 42, 0.8), rgba(30, 41, 59, 0.6))',
-              border: '1px solid rgba(168, 85, 247, 0.3)'
+              background: 'rgba(255, 255, 255, 0.55)',
+              border: '1px solid rgba(175, 82, 222, 0.25)'
             }}>
               <div className="sniper-card-header">
                 <span>交易手续费与 LLM 消耗</span>
-                <Coins size={18} style={{ color: '#A855F7' }} />
+                <Coins size={18} style={{ color: '#8944ab' }} />
               </div>
-              <div className="sniper-card-val" style={{ color: '#A855F7', fontSize: '1.4rem' }}>
+              <div className="sniper-card-val" style={{ color: '#8944ab', fontSize: '1.4rem' }}>
                 ${result.total_fees_usd}
               </div>
               <div className="sniper-card-sub">
@@ -494,21 +494,21 @@ export default function BacktestPanel({ apiBase, symbols = [] }) {
           <div className="panel" style={{ padding: '1.25rem' }}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.8rem' }}>
               <div style={{ fontSize: '0.92rem', fontWeight: 700, color: 'var(--text-bright)', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                <BarChart2 size={16} style={{ color: '#10B981' }} />
+                <BarChart2 size={16} style={{ color: '#248a3d' }} />
                 <span>回测净权益增长曲线（含手续费与滑点）</span>
               </div>
               <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>虚线为初始本金水位 ($10,000)</span>
             </div>
-            <div style={{ background: 'rgba(15, 23, 42, 0.6)', borderRadius: '8px', padding: '0.5rem', border: '1px solid var(--border-color)' }}>
+            <div style={{ background: 'rgba(255, 255, 255, 0.5)', borderRadius: '8px', padding: '0.5rem', border: '1px solid var(--border-color)' }}>
               <canvas ref={canvasRef} style={{ width: '100%', height: '180px' }}></canvas>
             </div>
           </div>
 
           {/* Trade Executions Table */}
           <div className="panel" style={{ padding: 0, overflow: 'hidden' }}>
-            <div style={{ padding: '1rem 1.25rem', borderBottom: '1px solid var(--border-color)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: 'rgba(15, 23, 42, 0.6)' }}>
+            <div style={{ padding: '1rem 1.25rem', borderBottom: '1px solid var(--border-color)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: 'rgba(255, 255, 255, 0.5)' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                <Layers size={16} style={{ color: '#06B6D4' }} />
+                <Layers size={16} style={{ color: '#007aff' }} />
                 <h3 style={{ fontSize: '0.95rem', fontWeight: 700, color: 'var(--text-bright)', margin: 0 }}>
                   模拟成交记录明细 ({result.trades.length} 笔)
                 </h3>
@@ -541,7 +541,7 @@ export default function BacktestPanel({ apiBase, symbols = [] }) {
                     const isLong = t.signal_type === 'long';
                     const isWin = (t.pnl_usd || 0) >= 0;
                     return (
-                      <tr key={t.id} style={{ background: isWin ? 'rgba(16, 185, 129, 0.02)' : 'rgba(239, 68, 68, 0.02)' }}>
+                      <tr key={t.id} style={{ background: isWin ? 'rgba(52, 199, 89, 0.03)' : 'rgba(255, 59, 48, 0.03)' }}>
                         <td style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>{t.entered_at}</td>
                         <td>
                           <span style={{
@@ -549,9 +549,9 @@ export default function BacktestPanel({ apiBase, symbols = [] }) {
                             fontWeight: 700,
                             padding: '0.15rem 0.5rem',
                             borderRadius: '4px',
-                            color: isLong ? '#10B981' : '#EF4444',
-                            background: isLong ? 'rgba(16, 185, 129, 0.12)' : 'rgba(239, 68, 68, 0.12)',
-                            border: `1px solid ${isLong ? 'rgba(16, 185, 129, 0.3)' : 'rgba(239, 68, 68, 0.3)'}`
+                            color: isLong ? '#248a3d' : '#d70015',
+                            background: isLong ? 'rgba(52, 199, 89, 0.08)' : 'rgba(255, 59, 48, 0.08)',
+                            border: `1px solid ${isLong ? 'rgba(52, 199, 89, 0.2)' : 'rgba(255, 59, 48, 0.2)'}`
                           }}>
                             {isLong ? '📈 做多 (LONG)' : '📉 做空 (SHORT)'}
                           </span>
@@ -559,9 +559,9 @@ export default function BacktestPanel({ apiBase, symbols = [] }) {
                         <td style={{ fontSize: '0.78rem' }}>{t.status}</td>
                         <td style={{ fontWeight: 600 }}>{t.leverage}x</td>
                         <td style={{ fontFamily: 'monospace' }}>${t.actual_entry || t.planned_entry}</td>
-                        <td style={{ color: '#EF4444', fontFamily: 'monospace' }}>${t.initial_stop_loss || t.stop_loss}</td>
+                        <td style={{ color: '#d70015', fontFamily: 'monospace' }}>${t.initial_stop_loss || t.stop_loss}</td>
                         <td>
-                          <strong style={{ color: isWin ? '#10B981' : '#EF4444', fontSize: '0.92rem' }}>
+                          <strong style={{ color: isWin ? '#248a3d' : '#d70015', fontSize: '0.92rem' }}>
                             {isWin ? '+' : ''}${t.pnl_usd}
                           </strong>
                         </td>
@@ -578,9 +578,9 @@ export default function BacktestPanel({ apiBase, symbols = [] }) {
           </div>
 
           {/* Simulation Notes */}
-          <div style={{ padding: '0.85rem 1.25rem', borderRadius: '10px', background: 'rgba(15, 23, 42, 0.6)', border: '1px solid var(--border-color)', fontSize: '0.78rem', color: 'var(--text-muted)', lineHeight: '1.6' }}>
+          <div style={{ padding: '0.85rem 1.25rem', borderRadius: '10px', background: 'rgba(255, 255, 255, 0.5)', border: '1px solid var(--border-color)', fontSize: '0.78rem', color: 'var(--text-muted)', lineHeight: '1.6' }}>
             <div style={{ color: 'var(--text-bright)', fontWeight: 600, marginBottom: '0.3rem', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-              <ShieldAlert size={15} style={{ color: '#06B6D4' }} />
+              <ShieldAlert size={15} style={{ color: '#007aff' }} />
               <span>回测风控与撮合口径依据</span>
             </div>
             {(result.simulation_notes || []).map((n, i) => (

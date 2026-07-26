@@ -398,7 +398,7 @@ def clean_and_compress(data_frames, fib_levels, symbol, fib_4h=None, key_levels=
             'RSI_14', 'ATR_14', 'ADX_14',
             'KDJ_K', 'KDJ_D', 'KDJ_J',
             'MACD_DIF', 'MACD_Hist', 'MACD_DEA',
-            'VWAP'
+            'VWAP', 'OBV', 'OBV_EMA20'
         ]
 
         records = []
@@ -410,7 +410,7 @@ def clean_and_compress(data_frames, fib_levels, symbol, fib_4h=None, key_levels=
                 val = row.get(col)
                 if pd.notna(val):
                     abs_val = abs(float(val))
-                    if col in ['RSI_14', 'ADX_14', 'KDJ_K', 'KDJ_D', 'KDJ_J', 'volume']:
+                    if col in ['RSI_14', 'ADX_14', 'KDJ_K', 'KDJ_D', 'KDJ_J', 'volume', 'OBV', 'OBV_EMA20']:
                         record[col] = round(float(val), 2)
                     elif col in ['MACD_DIF', 'MACD_Hist', 'MACD_DEA']:
                         if abs_val == 0:

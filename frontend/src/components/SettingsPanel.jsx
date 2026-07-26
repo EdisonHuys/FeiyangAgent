@@ -274,7 +274,7 @@ export default function SettingsPanel({ apiBase }) {
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.5rem' }}>
         {/* Left Config Column */}
         <div>
-          <h4 style={{ color: 'var(--text-bright)', marginBottom: '1rem', borderBottom: '1px solid rgba(255,255,255,0.05)', paddingBottom: '0.25rem' }}>⚙️ 交易与大模型参数</h4>
+          <h4 style={{ color: 'var(--text-bright)', marginBottom: '1rem', borderBottom: '1px solid rgba(0,0,0,0.06)', paddingBottom: '0.25rem' }}>⚙️ 交易与大模型参数</h4>
           
           <div className="form-group">
             <label className="form-label">主页默认展示交易对 (启动时加载的默认币对)</label>
@@ -295,14 +295,14 @@ export default function SettingsPanel({ apiBase }) {
               <span>自选监控交易对列表</span>
               <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>已添加 {config.symbols ? config.symbols.length : 0} 个</span>
             </label>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem', marginBottom: '0.75rem', padding: '0.5rem', background: 'rgba(255,255,255,0.01)', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.04)', minHeight: '38px', alignItems: 'center' }}>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem', marginBottom: '0.75rem', padding: '0.5rem', background: 'rgba(255,255,255,0.5)', borderRadius: '6px', border: '1px solid rgba(0,0,0,0.06)', minHeight: '38px', alignItems: 'center' }}>
               {config.symbols && config.symbols.map(sym => (
                 <div 
                   key={sym} 
                   className="badge" 
                   style={{ 
-                    background: 'rgba(255,255,255,0.04)', 
-                    border: '1px solid rgba(255,255,255,0.08)', 
+                    background: 'rgba(0,0,0,0.03)', 
+                    border: '1px solid rgba(0,0,0,0.08)', 
                     borderRadius: '4px', 
                     padding: '0.2rem 0.5rem', 
                     display: 'flex', 
@@ -384,8 +384,8 @@ export default function SettingsPanel({ apiBase }) {
                   flex: 1,
                   padding: '0.5rem',
                   fontSize: '0.85rem',
-                  background: config.openai_api_base.includes('localhost') || config.openai_api_base.includes('127.0.0.1') ? 'rgba(255,255,255,0.05)' : 'rgba(16, 185, 129, 0.1)',
-                  borderColor: config.openai_api_base.includes('localhost') || config.openai_api_base.includes('127.0.0.1') ? 'rgba(255,255,255,0.1)' : 'rgb(16, 185, 129)',
+                  background: config.openai_api_base.includes('localhost') || config.openai_api_base.includes('127.0.0.1') ? 'rgba(0,0,0,0.03)' : 'rgba(52, 199, 89, 0.08)',
+                  borderColor: config.openai_api_base.includes('localhost') || config.openai_api_base.includes('127.0.0.1') ? 'rgba(0,0,0,0.08)' : 'rgba(52, 199, 89, 0.4)',
                   color: config.openai_api_base.includes('localhost') || config.openai_api_base.includes('127.0.0.1') ? 'var(--text-muted)' : 'rgb(16, 185, 129)',
                   borderWidth: '1px',
                   borderStyle: 'solid',
@@ -412,8 +412,8 @@ export default function SettingsPanel({ apiBase }) {
                   flex: 1,
                   padding: '0.5rem',
                   fontSize: '0.85rem',
-                  background: config.openai_api_base.includes('localhost') || config.openai_api_base.includes('127.0.0.1') ? 'rgba(16, 185, 129, 0.1)' : 'rgba(255,255,255,0.05)',
-                  borderColor: config.openai_api_base.includes('localhost') || config.openai_api_base.includes('127.0.0.1') ? 'rgb(16, 185, 129)' : 'rgba(255,255,255,0.1)',
+                  background: config.openai_api_base.includes('localhost') || config.openai_api_base.includes('127.0.0.1') ? 'rgba(52, 199, 89, 0.08)' : 'rgba(0,0,0,0.03)',
+                  borderColor: config.openai_api_base.includes('localhost') || config.openai_api_base.includes('127.0.0.1') ? 'rgba(52, 199, 89, 0.4)' : 'rgba(0,0,0,0.08)',
                   color: config.openai_api_base.includes('localhost') || config.openai_api_base.includes('127.0.0.1') ? 'rgb(16, 185, 129)' : 'var(--text-muted)',
                   borderWidth: '1px',
                   borderStyle: 'solid',
@@ -504,7 +504,7 @@ export default function SettingsPanel({ apiBase }) {
                   fontSize: '0.85rem',
                   border: '1px solid',
                   background: testResult.status === 'success' ? 'rgba(0, 230, 118, 0.08)' : 'rgba(255, 23, 68, 0.08)',
-                  borderColor: testResult.status === 'success' ? 'rgba(0, 230, 118, 0.3)' : 'rgba(255, 23, 68, 0.3)',
+                  borderColor: testResult.status === 'success' ? 'rgba(52, 199, 89, 0.25)' : 'rgba(255, 59, 48, 0.25)',
                   color: testResult.status === 'success' ? 'var(--color-long)' : 'var(--color-short)',
                   lineHeight: '1.4'
                 }}
@@ -517,7 +517,7 @@ export default function SettingsPanel({ apiBase }) {
 
         {/* Right Notifier Column */}
         <div>
-          <h4 style={{ color: 'var(--text-bright)', marginBottom: '1rem', borderBottom: '1px solid rgba(255,255,255,0.05)', paddingBottom: '0.25rem' }}>🔔 消息通道设置</h4>
+          <h4 style={{ color: 'var(--text-bright)', marginBottom: '1rem', borderBottom: '1px solid rgba(0,0,0,0.06)', paddingBottom: '0.25rem' }}>🔔 消息通道设置</h4>
           
           <div className="form-group" style={{ marginBottom: '1rem' }}>
             <div className="checkbox-group">
@@ -534,7 +534,7 @@ export default function SettingsPanel({ apiBase }) {
           </div>
 
           {config.notify_enabled && (
-            <div style={{ padding: '0.75rem', background: 'rgba(255,255,255,0.01)', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.05)' }}>
+            <div style={{ padding: '0.75rem', background: 'rgba(255,255,255,0.5)', borderRadius: '8px', border: '1px solid rgba(0,0,0,0.06)' }}>
               <div className="form-group" style={{ marginBottom: '1rem' }}>
                 <label className="form-label">推送触发事件策略开关</label>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginTop: '0.5rem' }}>
@@ -660,7 +660,7 @@ export default function SettingsPanel({ apiBase }) {
                       fontSize: '0.85rem',
                       border: '1px solid',
                       background: notificationTestResult.status === 'success' ? 'rgba(0, 230, 118, 0.08)' : 'rgba(255, 23, 68, 0.08)',
-                      borderColor: notificationTestResult.status === 'success' ? 'rgba(0, 230, 118, 0.3)' : 'rgba(255, 23, 68, 0.3)',
+                      borderColor: notificationTestResult.status === 'success' ? 'rgba(52, 199, 89, 0.25)' : 'rgba(255, 59, 48, 0.25)',
                       color: notificationTestResult.status === 'success' ? 'var(--color-long)' : 'var(--color-short)',
                       lineHeight: '1.4'
                     }}

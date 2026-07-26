@@ -640,7 +640,11 @@ class SniperEngine:
         }
 
     def _fetch_live_positions(self):
-        """Fetch active positions from the exchange API and normalize them with caching."""
+        """Fetch active positions from the exchange API and normalize them with caching.
+        
+        Uses fapiPrivateV2GetPositionRisk for STATIC configured leverage (not effective),
+        and calculates allocated margin = entry * size / leverage (stable, matches exchange UI).
+        """
         now = time.time()
         # Return cache if it is fresh (60s TTL)
         if self._live_positions_cache is not None and (now - self._live_positions_cache_time) < 60.0:
@@ -648,6 +652,25 @@ class SniperEngine:
             
         try:
             exchange, ex_id = self._init_live_ccxt()
+            
+            # ── Step 1: Get STATIC leverage from V2 PositionRisk endpoint ──
+            # fetch_positions() (V3) does NOT return leverage in info dict.
+            # V2 returns the configured leverage (e.g. "47") which never changes.
+            v2_leverage_map = {}  # symbol -> configured leverage
+            try:
+                raw_v2 = exchange.fapiPrivateV2GetPositionRisk()
+                for rv in raw_v2:
+                    amt = float(rv.get("positionAmt", 0) or 0)
+                    if amt != 0:
+                        sym = rv.get("symbol", "")  # e.g. "ETHUSDT"
+                        lev = int(float(rv.get("leverage", 0) or 0))
+                        if sym and lev > 0:
+                            v2_leverage_map[sym] = lev
+                logger.info(f"[PositionSync] V2 leverage map: {v2_leverage_map}")
+            except Exception as v2e:
+                logger.warning(f"[PositionSync] V2 PositionRisk failed (fallback to V3): {v2e}")
+            
+            # ── Step 2: Get full position data from fetch_positions ──
             if hasattr(exchange, 'fetch_positions'):
                 raw_positions = exchange.fetch_positions()
                 open_pos = []
@@ -661,21 +684,56 @@ class SniperEngine:
                         if not symbol:
                             continue
                         clean_sym = symbol.split(":")[0] if ":" in symbol else symbol
+                        # Raw Binance symbol for V2 map lookup (e.g. "ETHUSDT")
+                        raw_binance_sym = symbol.replace("/", "").replace(":USDT", "")
                         
                         side_str = str(p.get("side", "long")).lower()
                         normalized_side = "long" if ("buy" in side_str or "long" in side_str) else "short"
                         
                         mark_price = float(p.get("markPrice", 0.0) or 0.0)
-                        leverage = int(p.get("leverage", 1) or 1)
                         unrealized_pnl = float(p.get("unrealizedPnl", 0.0) or 0.0)
-                        margin = float(p.get("initialMargin", 0.0) or (notional / leverage if leverage else 0.0))
+                        info = p.get("info", {}) if isinstance(p.get("info"), dict) else {}
+                        
+                        # ── Leverage: prefer V2 configured value (STATIC) ──
+                        leverage = v2_leverage_map.get(raw_binance_sym, 0)
+                        if leverage == 0:
+                            leverage = int(float(info.get("leverage", 0) or 0))
+                        if leverage == 0:
+                            leverage = int(float(p.get("leverage", 0) or 0))
+                        
+                        # ── Margin: use isolatedWallet (STABLE, matches exchange UI) ──
+                        # isolatedWallet = actual allocated margin (doesn't change with PnL)
+                        # isolatedMargin = isolatedWallet + unrealizedPnl (dynamic, NOT what UI shows)
+                        margin = float(info.get("isolatedWallet", 0.0) or 0.0)
+                        if margin == 0.0:
+                            # Fallback: calculate from entry * size / leverage
+                            position_amt = abs(float(info.get("positionAmt", 0.0) or 0.0))
+                            if position_amt == 0.0:
+                                position_amt = contracts
+                            if leverage > 0 and entry_price > 0 and position_amt > 0:
+                                margin = (entry_price * position_amt) / leverage
+                        if margin == 0.0:
+                            margin = float(info.get("positionInitialMargin", 0.0) or 0.0)
+                        if margin == 0.0 and leverage > 0 and notional > 0:
+                            margin = notional / leverage
+                        
+                        # Fallback: derive leverage if still 0
+                        if leverage == 0 and margin > 0 and notional > 0:
+                            leverage = max(1, round(notional / margin))
+                        
+                        logger.info(
+                            f"[PositionSync] {clean_sym} {normalized_side}: "
+                            f"lev={leverage}x | margin=${margin:.4f} | "
+                            f"entry=${entry_price} | mark=${mark_price} | "
+                            f"notional=${notional:.2f} | pnl=${unrealized_pnl:.4f}"
+                        )
                         
                         pct = float(p.get("percentage", 0.0) or 0.0)
-                        if pct == 0.0 and entry_price > 0:
+                        if pct == 0.0 and entry_price > 0 and leverage > 0:
                             if normalized_side == "long":
-                                pct = (mark_price - entry_price) / entry_price * 100.0
+                                pct = (mark_price - entry_price) / entry_price * leverage * 100.0
                             else:
-                                pct = (entry_price - mark_price) / entry_price * 100.0
+                                pct = (entry_price - mark_price) / entry_price * leverage * 100.0
                         
                         open_pos.append({
                             "symbol": clean_sym,
@@ -748,6 +806,27 @@ class SniperEngine:
                                 t["pnl_percent"] = real_pos["unrealized_pnl_percent"]
                                 t["unrealized_pnl_usd"] = real_pos["unrealized_pnl"]
                                 t["unrealized_pnl_percent"] = real_pos["unrealized_pnl_percent"]
+                                t["exchange_pnl_percent"] = real_pos["unrealized_pnl_percent"]
+
+                                # Unconditionally sync core params from exchange
+                                ex_lev = int(real_pos.get("leverage", 0) or 0)
+                                if ex_lev > 0:
+                                    t["leverage"] = ex_lev
+                                ex_margin = float(real_pos.get("margin", 0.0) or 0.0)
+                                if ex_margin > 0:
+                                    t["margin_usd"] = round(ex_margin, 4)
+                                ex_notional = float(real_pos.get("notional", 0.0) or 0.0)
+                                if ex_notional > 0:
+                                    t["position_size_usd"] = round(ex_notional, 2)
+                                ex_entry = float(real_pos.get("entry_price", 0.0) or 0.0)
+                                if ex_entry > 0:
+                                    old_entry = t.get("actual_entry")
+                                    if old_entry is None or abs(float(old_entry) - ex_entry) / ex_entry > 0.002:
+                                        t["peak_pnl_pct"] = 0.0
+                                        t["trailing_sl_level"] = 0.0
+                                        t["locked_pnl_percent"] = 0.0
+                                    t["actual_entry"] = ex_entry
+                                updated = True
                                 
                                 # Remove from real_pos_map so it's not marked as external
                                 real_pos_map.pop(key)
@@ -1068,6 +1147,35 @@ class SniperEngine:
     def reset_paper_data(self, initial_balance=10000.0):
         with self._lock:
             return self._reset_paper_data_impl(initial_balance)
+
+    def reset_live_data(self, initial_balance=10000.0):
+        with self._lock:
+            return self._reset_live_data_impl(initial_balance)
+
+    def _reset_live_data_impl(self, initial_balance=10000.0):
+        try:
+            initial_balance = float(initial_balance) if float(initial_balance) > 0 else 10000.0
+        except Exception:
+            initial_balance = 10000.0
+
+        cfg = self.state.get("config", {})
+        cfg["live_account_balance"] = initial_balance
+
+        # Reset daily baseline for live account
+        today = datetime.now().strftime("%Y-%m-%d")
+        daily = self.state.get("daily") or {}
+        daily["date"] = today
+        daily["start_balance_live"] = initial_balance
+        daily["halted_live"] = False
+        daily["notified_live"] = False
+        self.state["daily"] = daily
+
+        # Keep paper trades, but remove live trades
+        new_trades = [t for t in self.state.get("trades", []) if t.get("is_live") is not True]
+        self.state["trades"] = new_trades
+        self.state["config"] = cfg
+        self._save_state()
+        return {"status": "success", "message": f"实盘统计数据已清空！ live 账户基准重置为 ${initial_balance} USD。"}
 
     def _reset_paper_data_impl(self, initial_balance=10000.0):
         try:
@@ -1565,6 +1673,53 @@ class SniperEngine:
         trades = self.state.get("trades", [])
         updated = False
 
+        # 🔄 Live mode: sync position params from exchange every tick (60s cached)
+        # Exchange is the single source of truth for live positions
+        live_pos_map = {}
+        if mode == "live" and cfg.get("live_api_key") and cfg.get("live_secret"):
+            real_positions = self._fetch_live_positions()
+            if real_positions:
+                live_pos_map = {(p["symbol"], p["side"]): p for p in real_positions}
+                for t in trades:
+                    if t["status"] not in ["filled", "tp1_hit"]:
+                        continue
+                    if not t.get("is_live"):
+                        continue
+                    key = (t["symbol"], t["signal_type"].lower())
+                    rp = live_pos_map.get(key)
+                    if rp is None:
+                        continue
+                    # Unconditionally overwrite from exchange — no conditions
+                    ex_lev = int(rp.get("leverage", 0) or 0)
+                    if ex_lev > 0:
+                        t["leverage"] = ex_lev
+                    ex_margin = float(rp.get("margin", 0.0) or 0.0)
+                    if ex_margin > 0:
+                        t["margin_usd"] = round(ex_margin, 4)
+                    ex_notional = float(rp.get("notional", 0.0) or 0.0)
+                    if ex_notional > 0:
+                        t["position_size_usd"] = round(ex_notional, 2)
+                    ex_entry = float(rp.get("entry_price", 0.0) or 0.0)
+                    if ex_entry > 0:
+                        old_entry = t.get("actual_entry")
+                        if old_entry is None or abs(float(old_entry) - ex_entry) / ex_entry > 0.002:
+                            t["actual_entry"] = ex_entry
+                            t["peak_pnl_pct"] = 0.0
+                            t["trailing_sl_level"] = 0.0
+                            t["locked_pnl_percent"] = 0.0
+                        else:
+                            t["actual_entry"] = ex_entry
+                    # PnL from exchange (authoritative)
+                    t["exchange_pnl_percent"] = rp.get("unrealized_pnl_percent", 0.0)
+                    t["unrealized_pnl_percent"] = rp.get("unrealized_pnl_percent", 0.0)
+                    ex_pnl = float(rp.get("unrealized_pnl", 0.0) or 0.0)
+                    t["unrealized_pnl_usd"] = ex_pnl
+                    t["pnl_usd"] = ex_pnl
+                    ex_mark = float(rp.get("mark_price", 0.0) or 0.0)
+                    if ex_mark > 0:
+                        t["current_price"] = ex_mark
+                    updated = True
+
         for t in trades:
             if t["status"] in ["cancelled", "closed_tp", "closed_sl"]:
                 continue
@@ -1699,29 +1854,41 @@ class SniperEngine:
             amount = round(pos_val / actual_entry, 4)
 
             # Real-Time Floating Unrealized PnL Calculation
-            t["current_price"] = current_price
+            # For live positions with exchange sync, exchange data is authoritative
+            has_exchange_sync = t.get("is_live") and t.get("exchange_pnl_percent") is not None
+            if not has_exchange_sync:
+                t["current_price"] = current_price
             if sig_type == "long":
                 float_pct = (current_price - actual_entry) / actual_entry * lev
             else:
                 float_pct = (actual_entry - current_price) / actual_entry * lev
 
             rem_ratio = 0.5 if t.get("tp1_partial_closed") else 1.0
-            t["unrealized_pnl_percent"] = round(float_pct * 100.0, 2)
-            realized_pnl = t.get("pnl_usd", 0.0) if t.get("tp1_partial_closed") else 0.0
-            t["unrealized_pnl_usd"] = round((margin * rem_ratio * float_pct) + realized_pnl, 2)
+            if not has_exchange_sync:
+                t["unrealized_pnl_percent"] = round(float_pct * 100.0, 2)
+                realized_pnl = t.get("pnl_usd", 0.0) if t.get("tp1_partial_closed") else 0.0
+                t["unrealized_pnl_usd"] = round((margin * rem_ratio * float_pct) + realized_pnl, 2)
             updated = True
 
             # 🔒 Dynamic Trailing Stop Loss: milestones at every 10% PnL
-            # At 20% PnL → lock in 10%, at 30% → lock in 20%, etc.
+            # For live positions, prefer exchange-reported PnL (accounts for fees/funding)
+            # to avoid triggering on inflated theoretical gains
+            trailing_updated = False
             if t["status"] in ["filled", "tp1_hit"] and float_pct > 0:
-                trailing_updated = self._update_trailing_stop_loss(
-                    t=t,
-                    current_pnl_pct=float_pct * 100.0,
-                    actual_entry=actual_entry,
-                    sig_type=sig_type,
-                    lev=lev,
-                    amount=round(amount * rem_ratio, 4)
-                )
+                if t.get("is_live") and t.get("exchange_pnl_percent") is not None:
+                    # Use exchange-synced PnL% (survives monitoring loop overwrite)
+                    effective_pnl_pct = float(t["exchange_pnl_percent"])
+                else:
+                    effective_pnl_pct = float_pct * 100.0
+                if effective_pnl_pct > 0:
+                    trailing_updated = self._update_trailing_stop_loss(
+                        t=t,
+                        current_pnl_pct=effective_pnl_pct,
+                        actual_entry=actual_entry,
+                        sig_type=sig_type,
+                        lev=lev,
+                        amount=round(amount * rem_ratio, 4)
+                    )
                 if trailing_updated:
                     sl = t["stop_loss"]  # refresh local sl variable for the SL check below
 
@@ -1786,7 +1953,7 @@ class SniperEngine:
             pnl_breached = (float_pct * 100.0 <= -max_trade_loss_pct)
 
             if sig_type == "long":
-                if low_price <= effective_sl or pnl_breached:
+                if low_price <= sl or pnl_breached:
                     rem_ratio = 0.5 if t.get("tp1_partial_closed") else 1.0
                     trigger_reason = f"双保险触发：价格 ${low_price} 触及/穿透止损线 ${sl}" if not pnl_breached else f"实际盈亏风控触发：浮动亏损率达 {round(float_pct * 100.0, 2)}% 触及风控阈值 -{max_trade_loss_pct}%"
                     if not self._try_live_close(t, symbol, "long", round(amount * rem_ratio, 4), reason=trigger_reason, alert_tag="sl", current_price=low_price):
@@ -1859,7 +2026,7 @@ class SniperEngine:
                     )
 
             elif sig_type == "short":
-                if high_price >= effective_sl or pnl_breached:
+                if high_price >= sl or pnl_breached:
                     rem_ratio = 0.5 if t.get("tp1_partial_closed") else 1.0
                     trigger_reason = f"双保险触发：价格 ${high_price} 触及/穿透止损线 ${sl}" if not pnl_breached else f"实际盈亏风控触发：浮动亏损率达 {round(float_pct * 100.0, 2)}% 触及风控阈值 -{max_trade_loss_pct}%"
                     if not self._try_live_close(t, symbol, "short", round(amount * rem_ratio, 4), reason=trigger_reason, alert_tag="sl", current_price=high_price):
