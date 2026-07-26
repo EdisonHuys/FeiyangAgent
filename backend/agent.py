@@ -45,7 +45,19 @@ class FeiyangAgent:
         self.max_tokens = max_tokens
         self._system_prompt = system_prompt
         self.root_dir = root_dir
-        logger.info(f"FeiyangAgent initialized with model: {model_name}, endpoint: {api_base}")
+        
+        # Dynamically load min_confidence from trades.json config block, fallback to 7
+        self.min_confidence = 7
+        if root_dir:
+            trades_path = os.path.join(root_dir, "trades.json")
+            if os.path.exists(trades_path):
+                try:
+                    with open(trades_path, "r", encoding="utf-8") as f:
+                        trades_data = json.load(f)
+                        self.min_confidence = trades_data.get("config", {}).get("min_confidence", 7)
+                except Exception:
+                    pass
+        logger.info(f"FeiyangAgent initialized with model: {model_name}, min_confidence: {self.min_confidence}")
 
     DEFAULT_SYSTEM_PROMPT = """你是一个精通加密货币量化与技术面分析的顶级AI交易智能体，扮演资深分析师"飞扬"的角色。你的唯一目标是：在严格风控下，输出高胜率、高盈亏比的精准交易信号。
 
@@ -385,9 +397,9 @@ class FeiyangAgent:
         except (ValueError, TypeError):
             signal["confidence_score"] = 0
 
-        # Force wait if confidence < 7
-        if signal["confidence_score"] < 7 and signal["signal_type"] != "wait":
-            logger.info(f"Confidence {signal['confidence_score']} < 7, forcing wait.")
+        # Force wait if confidence < self.min_confidence
+        if signal["confidence_score"] < self.min_confidence and signal["signal_type"] != "wait":
+            logger.info(f"Confidence {signal['confidence_score']} < {self.min_confidence}, forcing wait.")
             signal["signal_type"] = "wait"
 
         return signal
