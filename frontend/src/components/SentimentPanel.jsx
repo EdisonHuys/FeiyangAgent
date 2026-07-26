@@ -53,7 +53,18 @@ export default function SentimentPanel({ apiBase }) {
 
   if (loading && !data) {
     return (
-      <div style={{ padding: '1.5rem', textAlign: 'center', color: 'var(--text-muted)', fontSize: '0.82rem' }}>
+      <div style={{
+        background: 'var(--glass-bg)',
+        border: '1px solid var(--glass-border)',
+        borderRadius: '12px',
+        padding: '1.5rem',
+        marginBottom: '1rem',
+        flexShrink: 0,
+        textAlign: 'center',
+        color: 'var(--text-muted)',
+        fontSize: '0.82rem',
+        backdropFilter: 'blur(30px)'
+      }}>
         正在加载市场情绪数据...
       </div>
     );
@@ -63,12 +74,13 @@ export default function SentimentPanel({ apiBase }) {
 
   return (
     <div style={{
-      background: 'rgba(255, 255, 255, 0.65)',
-      border: '1px solid rgba(175, 82, 222, 0.2)',
+      background: 'var(--glass-bg)',
+      border: '1px solid var(--glass-border)',
       borderRadius: '12px',
       padding: '1rem 1.25rem',
       marginBottom: '1rem',
-      flexShrink: 0
+      flexShrink: 0,
+      backdropFilter: 'blur(30px)'
     }}>
       {/* Header */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.85rem' }}>
@@ -103,7 +115,7 @@ export default function SentimentPanel({ apiBase }) {
       {/* Content Grid */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '0.75rem' }}>
         {/* Fear & Greed */}
-        <div style={{ background: 'rgba(0,0,0,0.03)', borderRadius: '8px', padding: '0.75rem', border: '1px solid rgba(0,0,0,0.06)' }}>
+        <div style={{ background: 'rgba(255, 255, 255, 0.03)', borderRadius: '8px', padding: '0.75rem', border: '1px solid rgba(255, 255, 255, 0.06)' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '0.5rem', fontSize: '0.72rem', color: 'var(--text-muted)' }}>
             <TrendingUp size={13} />
             <span>恐惧 & 贪婪指数</span>
@@ -119,7 +131,7 @@ export default function SentimentPanel({ apiBase }) {
                 </span>
               </div>
               {/* Progress bar */}
-              <div style={{ height: '4px', background: 'rgba(0,0,0,0.04)', borderRadius: '2px', marginTop: '0.4rem', overflow: 'hidden' }}>
+              <div style={{ height: '4px', background: 'rgba(255, 255, 255, 0.06)', borderRadius: '2px', marginTop: '0.4rem', overflow: 'hidden' }}>
                 <div style={{ height: '100%', width: `${data.fear_greed.value}%`, background: getFngColor(data.fear_greed.value), borderRadius: '2px', transition: 'width 0.5s' }} />
               </div>
               {data.fear_greed.trend && (
@@ -135,7 +147,7 @@ export default function SentimentPanel({ apiBase }) {
         </div>
 
         {/* Funding Rates */}
-        <div style={{ background: 'rgba(0,0,0,0.03)', borderRadius: '8px', padding: '0.75rem', border: '1px solid rgba(0,0,0,0.06)' }}>
+        <div style={{ background: 'rgba(255, 255, 255, 0.03)', borderRadius: '8px', padding: '0.75rem', border: '1px solid rgba(255, 255, 255, 0.06)' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '0.5rem', fontSize: '0.72rem', color: 'var(--text-muted)' }}>
             <Activity size={13} />
             <span>资金费率 (Funding Rate)</span>
@@ -164,7 +176,7 @@ export default function SentimentPanel({ apiBase }) {
         </div>
 
         {/* Macro Events */}
-        <div style={{ background: 'rgba(0,0,0,0.03)', borderRadius: '8px', padding: '0.75rem', border: '1px solid rgba(0,0,0,0.06)' }}>
+        <div style={{ background: 'rgba(255, 255, 255, 0.03)', borderRadius: '8px', padding: '0.75rem', border: '1px solid rgba(255, 255, 255, 0.06)' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '0.5rem', fontSize: '0.72rem', color: 'var(--text-muted)' }}>
             <Calendar size={13} />
             <span>宏观经济事件</span>
@@ -197,7 +209,7 @@ export default function SentimentPanel({ apiBase }) {
         </div>
 
         {/* News Headlines */}
-        <div style={{ background: 'rgba(0,0,0,0.03)', borderRadius: '8px', padding: '0.75rem', border: '1px solid rgba(0,0,0,0.06)' }}>
+        <div style={{ background: 'rgba(255, 255, 255, 0.03)', borderRadius: '8px', padding: '0.75rem', border: '1px solid rgba(255, 255, 255, 0.06)' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '0.5rem', fontSize: '0.72rem', color: 'var(--text-muted)' }}>
             <Newspaper size={13} />
             <span>加密市场快讯</span>

@@ -238,9 +238,9 @@ export default function PromptEditorPanel({ apiBase, standalone = true }) {
                 padding: '1rem',
                 borderRadius: '8px',
                 resize: 'vertical',
-                background: 'rgba(255, 255, 255, 0.7)',
-                color: '#1d1d1f',
-                border: '1px solid var(--border-color)',
+                background: 'rgba(255, 255, 255, 0.04)',
+                color: 'var(--text-main)',
+                border: '1px solid rgba(255, 255, 255, 0.1)',
                 boxSizing: 'border-box',
                 whiteSpace: 'pre-wrap',
                 outline: 'none'

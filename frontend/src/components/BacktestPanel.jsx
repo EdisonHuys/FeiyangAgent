@@ -210,12 +210,12 @@ export default function BacktestPanel({ apiBase, symbols = [] }) {
     <div className="sniper-container" style={{ gap: '1.25rem' }}>
       {/* 1. Header Banner */}
       <div className="sniper-header" style={{
-        background: 'rgba(255, 255, 255, 0.65)',
-        border: '1px solid rgba(0, 122, 255, 0.2)',
+        background: 'var(--glass-bg)',
+        border: '1px solid var(--glass-border)',
         borderRadius: '12px',
         padding: '1.25rem 1.5rem',
-        boxShadow: '0 4px 24px rgba(0, 0, 0, 0.08)',
-        backdropFilter: 'blur(12px)'
+        boxShadow: 'var(--glass-shadow)',
+        backdropFilter: 'blur(30px)'
       }}>
         <div className="sniper-header-left">
           <div className="sniper-icon-badge" style={{
@@ -274,7 +274,7 @@ export default function BacktestPanel({ apiBase, symbols = [] }) {
               onChange={e => setForm({ ...form, symbol: e.target.value })}
               className="form-control"
               disabled={running}
-              style={{ background: 'rgba(255, 255, 255, 0.6)', borderColor: 'var(--border-color)' }}
+              
             >
               {(symbols.length ? symbols : [form.symbol]).map(s => <option key={s} value={s}>{s}</option>)}
             </select>
@@ -291,7 +291,7 @@ export default function BacktestPanel({ apiBase, symbols = [] }) {
               disabled={running}
               onChange={e => setForm({ ...form, days: Math.max(1, parseInt(e.target.value) || 1) })}
               className="form-control"
-              style={{ background: 'rgba(255, 255, 255, 0.6)', borderColor: 'var(--border-color)' }}
+              
             />
           </div>
 
@@ -306,7 +306,7 @@ export default function BacktestPanel({ apiBase, symbols = [] }) {
               disabled={running}
               onChange={e => setForm({ ...form, step_hours: Math.max(1, parseInt(e.target.value) || 1) })}
               className="form-control"
-              style={{ background: 'rgba(255, 255, 255, 0.6)', borderColor: 'var(--border-color)' }}
+              
             />
           </div>
 
@@ -321,7 +321,7 @@ export default function BacktestPanel({ apiBase, symbols = [] }) {
               disabled={running}
               onChange={e => setForm({ ...form, max_llm_calls: Math.max(1, parseInt(e.target.value) || 1) })}
               className="form-control"
-              style={{ background: 'rgba(255, 255, 255, 0.6)', borderColor: 'var(--border-color)' }}
+              
             />
           </div>
 
@@ -335,7 +335,7 @@ export default function BacktestPanel({ apiBase, symbols = [] }) {
               disabled={running}
               onChange={e => setForm({ ...form, initial_balance: Math.max(10, parseFloat(e.target.value) || 10000) })}
               className="form-control"
-              style={{ background: 'rgba(255, 255, 255, 0.6)', borderColor: 'var(--border-color)' }}
+              
             />
           </div>
 

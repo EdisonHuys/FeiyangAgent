@@ -346,12 +346,12 @@ export default function SniperDashboard({ apiBase }) {
     <div className="sniper-container">
       {/* 1. Top Header & Control Center */}
       <div className="sniper-header" style={{
-        background: 'rgba(255, 255, 255, 0.65)',
-        border: '1px solid rgba(0, 122, 255, 0.2)',
+        background: 'var(--glass-bg)',
+        border: '1px solid var(--glass-border)',
         borderRadius: '12px',
         padding: '1.25rem 1.5rem',
-        boxShadow: '0 4px 24px rgba(0, 0, 0, 0.08)',
-        backdropFilter: 'blur(12px)'
+        boxShadow: 'var(--glass-shadow)',
+        backdropFilter: 'blur(30px)'
       }}>
         <div className="sniper-header-left">
           <div className="sniper-icon-badge" style={{
@@ -376,7 +376,7 @@ export default function SniperDashboard({ apiBase }) {
 
         {/* Master Switcher */}
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'nowrap' }}>
-          <div className="sniper-mode-bar" style={{ background: 'rgba(255, 255, 255, 0.6)', padding: '3px', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
+          <div className="sniper-mode-bar" style={{ background: 'rgba(0, 0, 0, 0.2)', padding: '3px', borderRadius: '8px', border: '1px solid rgba(255, 255, 255, 0.08)' }}>
             <button
               onClick={() => handleModeChange('off')}
               className={`sniper-mode-btn ${mode === 'off' ? 'active-off' : ''}`}
@@ -471,12 +471,12 @@ export default function SniperDashboard({ apiBase }) {
       {/* 2. Key Telemetry Metric Cards */}
       <div className="sniper-grid">
         {/* Win Rate */}
-        <div className="sniper-card" style={{ background: 'rgba(255, 255, 255, 0.55)', border: '1px solid rgba(255, 149, 0, 0.2)' }}>
+        <div className="sniper-card" style={{ background: 'rgba(255, 255, 255, 0.04)', border: '1px solid rgba(245, 158, 11, 0.25)' }}>
           <div className="sniper-card-header">
             <span>交易胜率 (Win Rate)</span>
-            <Award size={18} style={{ color: '#b25000' }} />
+            <Award size={18} style={{ color: '#f59e0b' }} />
           </div>
-          <div className="sniper-card-val" style={{ color: '#b25000', fontSize: '1.4rem', fontWeight: 800 }}>
+          <div className="sniper-card-val" style={{ color: '#f59e0b', fontSize: '1.4rem', fontWeight: 800 }}>
             {winRate}%
           </div>
           <div className="sniper-card-sub">
@@ -485,12 +485,12 @@ export default function SniperDashboard({ apiBase }) {
         </div>
 
         {/* Net Profit */}
-        <div className="sniper-card" style={{ background: 'rgba(255, 255, 255, 0.55)', border: `1px solid ${netProfit >= 0 ? 'rgba(52, 199, 89, 0.2)' : 'rgba(255, 59, 48, 0.2)'}` }}>
+        <div className="sniper-card" style={{ background: 'rgba(255, 255, 255, 0.04)', border: `1px solid ${netProfit >= 0 ? 'rgba(16, 185, 129, 0.25)' : 'rgba(244, 63, 94, 0.25)'}` }}>
           <div className="sniper-card-header">
             <span>已实现累计净收益</span>
-            <TrendingUp size={18} style={{ color: netProfit >= 0 ? '#248a3d' : '#d70015' }} />
+            <TrendingUp size={18} style={{ color: netProfit >= 0 ? '#10b981' : '#f43f5e' }} />
           </div>
-          <div className="sniper-card-val" style={{ color: netProfit >= 0 ? '#248a3d' : '#d70015', fontSize: '1.4rem', fontWeight: 800 }}>
+          <div className="sniper-card-val" style={{ color: netProfit >= 0 ? '#10b981' : '#f43f5e', fontSize: '1.4rem', fontWeight: 800 }}>
             {netProfit >= 0 ? '+' : ''}${netProfit.toFixed(2)} USD
           </div>
           <div className="sniper-card-sub">
@@ -499,12 +499,12 @@ export default function SniperDashboard({ apiBase }) {
         </div>
 
         {/* Leverage & Risk */}
-        <div className="sniper-card" style={{ background: 'rgba(255, 255, 255, 0.55)', border: '1px solid rgba(0, 122, 255, 0.2)' }}>
+        <div className="sniper-card" style={{ background: 'rgba(255, 255, 255, 0.04)', border: '1px solid rgba(56, 189, 248, 0.25)' }}>
           <div className="sniper-card-header">
             <span>风控偏好与杠杆模式</span>
-            <ShieldAlert size={18} style={{ color: '#0077b6' }} />
+            <ShieldAlert size={18} style={{ color: '#38bdf8' }} />
           </div>
-          <div className="sniper-card-val" style={{ color: '#0077b6', fontSize: '1.4rem', fontWeight: 800 }}>
+          <div className="sniper-card-val" style={{ color: '#38bdf8', fontSize: '1.4rem', fontWeight: 800 }}>
             {formConfig.leverage_mode === 'fixed' ? `${formConfig.fixed_leverage || 50}x (固定)` : `${formConfig.min_leverage || 35}-${formConfig.max_leverage || 70}x (智能)`}
           </div>
           <div className="sniper-card-sub">
@@ -513,12 +513,12 @@ export default function SniperDashboard({ apiBase }) {
         </div>
 
         {/* Active Positions */}
-        <div className="sniper-card" style={{ background: 'rgba(255, 255, 255, 0.55)', border: '1px solid rgba(175, 82, 222, 0.2)' }}>
+        <div className="sniper-card" style={{ background: 'rgba(255, 255, 255, 0.04)', border: '1px solid rgba(192, 132, 252, 0.25)' }}>
           <div className="sniper-card-header">
             <span>实时埋伏/活跃仓位</span>
-            <Layers size={18} style={{ color: '#8944ab' }} />
+            <Layers size={18} style={{ color: '#c084fc' }} />
           </div>
-          <div className="sniper-card-val" style={{ color: '#8944ab', fontSize: '1.4rem', fontWeight: 800 }}>
+          <div className="sniper-card-val" style={{ color: '#c084fc', fontSize: '1.4rem', fontWeight: 800 }}>
             {trades.filter(t => ['pending', 'filled', 'tp1_hit'].includes(t.status)).length} <span style={{ fontSize: '0.85rem', color: 'var(--text-muted)', fontWeight: 400 }}>/ 最多 {formConfig.max_active_trades} 单</span>
           </div>
           <div className="sniper-card-sub">
@@ -527,12 +527,12 @@ export default function SniperDashboard({ apiBase }) {
         </div>
 
         {/* Max Drawdown */}
-        <div className="sniper-card" style={{ background: 'rgba(255, 255, 255, 0.55)', border: '1px solid rgba(255, 59, 48, 0.2)' }}>
+        <div className="sniper-card" style={{ background: 'rgba(255, 255, 255, 0.04)', border: '1px solid rgba(244, 63, 94, 0.25)' }}>
           <div className="sniper-card-header">
             <span>历史最大回撤 (Max DD)</span>
-            <Activity size={18} style={{ color: '#d70015' }} />
+            <Activity size={18} style={{ color: '#f43f5e' }} />
           </div>
-          <div className="sniper-card-val" style={{ color: (dashboardData?.max_drawdown_percent || 0) > 10 ? '#d70015' : '#007aff', fontSize: '1.4rem', fontWeight: 800 }}>
+          <div className="sniper-card-val" style={{ color: (dashboardData?.max_drawdown_percent || 0) > 10 ? '#f43f5e' : '#38bdf8', fontSize: '1.4rem', fontWeight: 800 }}>
             -{dashboardData?.max_drawdown_percent || 0}%
           </div>
           <div className="sniper-card-sub">
@@ -541,16 +541,16 @@ export default function SniperDashboard({ apiBase }) {
         </div>
 
         {/* Circuit Breaker & Trading Costs */}
-        <div className="sniper-card" style={{ background: 'rgba(255, 255, 255, 0.55)', border: `1px solid ${dashboardData?.circuit_breaker?.halted ? 'rgba(255, 59, 48, 0.25)' : 'rgba(52, 199, 89, 0.2)'}` }}>
+        <div className="sniper-card" style={{ background: 'rgba(255, 255, 255, 0.04)', border: `1px solid ${dashboardData?.circuit_breaker?.halted ? 'rgba(244, 63, 94, 0.25)' : 'rgba(16, 185, 129, 0.25)'}` }}>
           <div className="sniper-card-header">
             <span>日内熔断与交易成本</span>
-            <ShieldAlert size={18} style={{ color: dashboardData?.circuit_breaker?.halted ? '#d70015' : '#248a3d' }} />
+            <ShieldAlert size={18} style={{ color: dashboardData?.circuit_breaker?.halted ? '#f43f5e' : '#10b981' }} />
           </div>
-          <div className="sniper-card-val" style={{ color: dashboardData?.circuit_breaker?.halted ? '#d70015' : '#248a3d', fontSize: '1.15rem', fontWeight: 800 }}>
+          <div className="sniper-card-val" style={{ color: dashboardData?.circuit_breaker?.halted ? '#f43f5e' : '#10b981', fontSize: '1.15rem', fontWeight: 800 }}>
             {dashboardData?.circuit_breaker?.halted ? '🚨 已熔断停牌' : `🛡️ 守护中 (-${dashboardData?.circuit_breaker?.daily_max_loss_percent ?? 6}%)`}
           </div>
           <div className="sniper-card-sub">
-            今日盈亏: <strong style={{ color: (dashboardData?.circuit_breaker?.day_realized_pnl ?? 0) >= 0 ? '#248a3d' : '#d70015' }}>{dashboardData?.circuit_breaker?.day_realized_pnl ?? 0} USD</strong>
+            今日盈亏: <strong style={{ color: (dashboardData?.circuit_breaker?.day_realized_pnl ?? 0) >= 0 ? '#10b981' : '#f43f5e' }}>{dashboardData?.circuit_breaker?.day_realized_pnl ?? 0} USD</strong>
             {' '}| 累计手续费: <strong style={{ color: 'var(--text-bright)' }}>${dashboardData?.total_fees_usd || 0}</strong>
           </div>
         </div>

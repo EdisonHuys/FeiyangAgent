@@ -295,14 +295,14 @@ export default function SettingsPanel({ apiBase }) {
               <span>自选监控交易对列表</span>
               <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>已添加 {config.symbols ? config.symbols.length : 0} 个</span>
             </label>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem', marginBottom: '0.75rem', padding: '0.5rem', background: 'rgba(255,255,255,0.5)', borderRadius: '6px', border: '1px solid rgba(0,0,0,0.06)', minHeight: '38px', alignItems: 'center' }}>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem', marginBottom: '0.75rem', padding: '0.5rem', background: 'rgba(255, 255, 255, 0.04)', borderRadius: '6px', border: '1px solid rgba(255, 255, 255, 0.08)', minHeight: '38px', alignItems: 'center' }}>
               {config.symbols && config.symbols.map(sym => (
                 <div 
                   key={sym} 
                   className="badge" 
                   style={{ 
-                    background: 'rgba(0,0,0,0.03)', 
-                    border: '1px solid rgba(0,0,0,0.08)', 
+                    background: 'rgba(255, 255, 255, 0.08)', 
+                    border: '1px solid rgba(255, 255, 255, 0.12)', 
                     borderRadius: '4px', 
                     padding: '0.2rem 0.5rem', 
                     display: 'flex', 
@@ -534,7 +534,7 @@ export default function SettingsPanel({ apiBase }) {
           </div>
 
           {config.notify_enabled && (
-            <div style={{ padding: '0.75rem', background: 'rgba(255,255,255,0.5)', borderRadius: '8px', border: '1px solid rgba(0,0,0,0.06)' }}>
+            <div style={{ padding: '0.75rem', background: 'rgba(255, 255, 255, 0.04)', borderRadius: '8px', border: '1px solid rgba(255, 255, 255, 0.08)' }}>
               <div className="form-group" style={{ marginBottom: '1rem' }}>
                 <label className="form-label">推送触发事件策略开关</label>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginTop: '0.5rem' }}>
