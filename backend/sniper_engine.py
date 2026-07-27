@@ -467,6 +467,48 @@ class SniperEngine:
         finally:
             trade["protective_sl_order_id"] = None
 
+    def _cancel_all_conditional_orders_for_symbol(self, symbol):
+        """
+        Cancel ALL conditional/trigger/stop orders on the exchange for a given symbol.
+        Called whenever a position exits (manual close, sync-based closure, etc.)
+        to prevent orphaned conditional orders from interfering with future positions.
+        """
+        try:
+            exchange, ex_id = self._init_live_ccxt()
+            ccxt_symbol = f"{symbol}:USDT" if ":" not in symbol else symbol
+            open_orders = exchange.fetch_open_orders(ccxt_symbol)
+            cancelled_count = 0
+            for order in open_orders:
+                o_id = order.get("id")
+                o_type = str(order.get("type", "")).upper()
+                o_info = order.get("info", {})
+                o_status = str(o_info.get("status", "")).upper()
+                # Cancel any conditional order: STOP_MARKET, TAKE_PROFIT_MARKET,
+                # TRAILING_STOP_MARKET, or any order with reduceOnly / trigger price
+                is_conditional = (
+                    "STOP" in o_type
+                    or "TAKE_PROFIT" in o_type
+                    or "TRAILING" in o_type
+                    or o_info.get("reduceOnly") in ("true", True, "TRUE")
+                    or o_info.get("stopPrice") not in (None, "", "0")
+                    or o_info.get("triggerPrice") not in (None, "", "0")
+                    or "STOP" in o_status
+                    or "PENDING" in o_status
+                )
+                if is_conditional:
+                    try:
+                        exchange.cancel_order(o_id, ccxt_symbol)
+                        cancelled_count += 1
+                        logger.info(f"[SniperEngine] 清理 {symbol} 遗留条件委托 #{o_id} (type={o_type})")
+                    except Exception as co_e:
+                        logger.warning(f"[SniperEngine] 撤销 {symbol} 条件委托 #{o_id} 失败: {co_e}")
+            if cancelled_count > 0:
+                logger.info(f"[SniperEngine] ✅ {symbol} 已清理 {cancelled_count} 个遗留条件委托")
+            return cancelled_count
+        except Exception as e:
+            logger.warning(f"[SniperEngine] 清理 {symbol} 条件委托时异常: {e}")
+            return 0
+
     def _try_live_close(self, trade, symbol, side, amount, reason, alert_tag, current_price=None):
         """
         Attempt a live market close with failure safety.
@@ -486,6 +528,8 @@ class SniperEngine:
         if close_id is not None:
             trade.pop(f"live_fail_alerted_{alert_tag}", None)
             self._cancel_protective_sl(trade)
+            # Comprehensive cleanup: cancel ALL remaining conditional orders for this symbol
+            self._cancel_all_conditional_orders_for_symbol(symbol)
             return True
 
         flag = f"live_fail_alerted_{alert_tag}"
@@ -837,7 +881,11 @@ class SniperEngine:
                                     t["status"] = "closed_tp" if t.get("pnl_usd", 0.0) >= 0 else "closed_sl"
                                     t["closed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                                     t["close_reason"] = "🗑️ 交易所侧仓位已平仓，系统自动同步平仓状态"
+                                    t["protective_sl_order_id"] = None
                                     updated = True
+                                    # Clean up orphaned conditional orders on the exchange
+                                    if t.get("is_live"):
+                                        self._cancel_all_conditional_orders_for_symbol(symbol)
                         synced_trades.append(t)
                     
                     # Add remaining positions from map as mock external trades
@@ -1069,6 +1117,9 @@ class SniperEngine:
                 # so it doesn't re-appear while exchange is still processing the close
                 self._closed_external_symbols[symbol] = time.time() + 90.0
                 self._live_positions_cache = None
+                
+                # Clean up orphaned conditional orders (stop/TP/trailing) on the exchange
+                self._cancel_all_conditional_orders_for_symbol(symbol)
                 
                 return {"status": "success", "message": f"已成功平仓外部/手动仓位 {symbol}，平仓量为 {size}！"}
             except Exception as close_e:
