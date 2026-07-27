@@ -31,6 +31,50 @@ export default function App() {
   const [monitorLogs, setMonitorLogs] = useState([]);
   const logConsoleRef = React.useRef(null);
 
+  // 0. Splash Screen loading animation
+  const [showSplash, setShowSplash] = useState(true);
+  const [splashFade, setSplashFade] = useState(false);
+  const [splashProgress, setSplashProgress] = useState(0);
+  const [splashStatus, setSplashStatus] = useState("Initializing Core...");
+
+  useEffect(() => {
+    const statuses = [
+      { progress: 15, text: "Initializing Terminal Core..." },
+      { progress: 38, text: "Establishing secure WebSocket tunnels..." },
+      { progress: 55, text: "Synchronizing exchange telemetry..." },
+      { progress: 78, text: "Computing multi-timeframe indicators..." },
+      { progress: 92, text: "Optimizing AI consensus engines..." },
+      { progress: 100, text: "System fully synchronized. Welcome." }
+    ];
+
+    let currentStep = 0;
+    const interval = setInterval(() => {
+      setSplashProgress(prev => {
+        const target = statuses[currentStep].progress;
+        if (prev < target) {
+          const next = prev + Math.floor(Math.random() * 4) + 1;
+          return next >= target ? target : next;
+        } else {
+          if (currentStep < statuses.length - 1) {
+            currentStep++;
+            setSplashStatus(statuses[currentStep].text);
+          } else {
+            clearInterval(interval);
+            setTimeout(() => {
+              setSplashFade(true);
+              setTimeout(() => {
+                setShowSplash(false);
+              }, 800);
+            }, 600);
+          }
+          return prev;
+        }
+      });
+    }, 30);
+
+    return () => clearInterval(interval);
+  }, []);
+
   // 1. Fetch config and default symbol on mount (and whenever tab changes to pick up settings updates)
   useEffect(() => {
     fetch(`${API_BASE}/api/config`)
@@ -316,7 +360,103 @@ export default function App() {
   };
 
   return (
-    <div className="app-container">
+    <>
+      {showSplash && (
+        <div className={`splash-overlay ${splashFade ? 'fade-out' : ''}`}>
+          {/* Tactical Scoping Grid Background */}
+          <div className="splash-grid-bg"></div>
+          
+          {/* Lock-on Laser Scan Line */}
+          <div className="splash-laser-line"></div>
+
+          {/* Matrix Crypto Price Streams (Parallax Tickers) */}
+          <div className="splash-ticker-stream stream-1">
+            {Array.from({ length: 15 }).map((_, i) => (
+              <div key={i} className="stream-item long">BTC/USDT 65,449.60 ▲ +1.24%</div>
+            ))}
+          </div>
+          <div className="splash-ticker-stream stream-2">
+            {Array.from({ length: 15 }).map((_, i) => (
+              <div key={i} className="stream-item short">ETH/USDT 1,969.44 ▼ -0.85%</div>
+            ))}
+          </div>
+          <div className="splash-ticker-stream stream-3">
+            {Array.from({ length: 15 }).map((_, i) => (
+              <div key={i} className="stream-item long">SOL/USDT 184.22 ▲ +5.41%</div>
+            ))}
+          </div>
+          <div className="splash-ticker-stream stream-4">
+            {Array.from({ length: 15 }).map((_, i) => (
+              <div key={i} className="stream-item short">DOGE/USDT 0.07312 ▼ -2.12%</div>
+            ))}
+          </div>
+
+          {/* Floating Telemetry Ticker Panels */}
+          <div className="splash-telemetry left-panel">
+            <div className="telemetry-header">📡 TELEMETRY SYSTEM ACTIVE</div>
+            <div className="telemetry-row">LOC: 31.2304° N, 121.4737° E</div>
+            <div className="telemetry-row">NET: 8ms (EXPRESS VIP)</div>
+            <div className="telemetry-row">CCXT: V5.1 (ACTIVE)</div>
+            <div className="telemetry-row">COGNITIVE: DUAL-LLM CONSENSUS</div>
+            <div className="telemetry-row">BIAS: BULLISH (CONVERGENCE)</div>
+          </div>
+          <div className="splash-telemetry right-panel">
+            <div className="telemetry-header">🔥 REALTIME EXECUTIONS</div>
+            <div className="telemetry-row">ZEC/USDT: 504.72 ▲ (PENDING)</div>
+            <div className="telemetry-row">HYPE/USDT: 60.176 ▲ (FILLED)</div>
+            <div className="telemetry-row">DOGE/USDT: 0.0731 ▼ (PENDING)</div>
+            <div className="telemetry-row">BTC/USDT: 65,817.75 ▼ (STANDBY)</div>
+            <div className="telemetry-row">ZAMA/USDT: 0.0549 ▲ (MONITORING)</div>
+          </div>
+
+          <div className="splash-sniper-scope">
+            {/* Scoping crosshair rings */}
+            <div className="scope-ring ring-outer"></div>
+            <div className="scope-ring ring-middle"></div>
+            
+            {/* Radar sweep beam */}
+            <div className="scope-radar-beam"></div>
+
+            <div className="scope-ring ring-inner">
+              {/* Target lock indicators */}
+              <div className="target-bracket corner-tl"></div>
+              <div className="target-bracket corner-tr"></div>
+              <div className="target-bracket corner-bl"></div>
+              <div className="target-bracket corner-br"></div>
+              
+              {/* Core lock data */}
+              <div className="scope-core">
+                <Target className="scope-icon" size={32} />
+                <div className="scope-price">{splashProgress === 100 ? "ACQUIRED" : "TARGETING..."}</div>
+                <div className="scope-ticker">{splashStatus}</div>
+              </div>
+            </div>
+            
+            {/* Crosshair lines */}
+            <div className="scope-line axis-h"></div>
+            <div className="scope-line axis-v"></div>
+            
+            {/* Scoping ticks */}
+            <div className="scope-tick tick-top">90°</div>
+            <div className="scope-tick tick-right">180°</div>
+            <div className="scope-tick tick-bottom">270°</div>
+            <div className="scope-tick tick-left">0°</div>
+          </div>
+
+          {/* Locked-on flash impact wave */}
+          {splashProgress === 100 && <div className="splash-lock-shockwave"></div>}
+
+          {/* Bottom status indicator */}
+          <div className="splash-bottom-loader">
+            <div className="progress-label">SNIPER SYSTEM SYNCHRONIZING: {splashProgress}%</div>
+            <div className="splash-progress-track">
+              <div className="splash-progress-fill" style={{ width: `${splashProgress}%` }}></div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div className="app-container">
       {/* Liquid animated glass blobs background */}
       <div className="liquid-bg">
         <div className="blob blob-gold"></div>
@@ -690,6 +830,7 @@ export default function App() {
         )}
       </main>
     </div>
+    </>
   );
 }
 
