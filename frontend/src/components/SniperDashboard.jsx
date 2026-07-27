@@ -471,7 +471,7 @@ export default function SniperDashboard({ apiBase }) {
       {/* 2. Key Telemetry Metric Cards */}
       <div className="sniper-grid">
         {/* Win Rate */}
-        <div className="sniper-card" style={{ background: 'rgba(255, 255, 255, 0.04)', border: '1px solid rgba(245, 158, 11, 0.25)' }}>
+        <div className="sniper-card" style={{ background: 'var(--glass-bg)', border: '1px solid rgba(245, 158, 11, 0.25)' }}>
           <div className="sniper-card-header">
             <span>交易胜率 (Win Rate)</span>
             <Award size={18} style={{ color: '#f59e0b' }} />
@@ -485,7 +485,7 @@ export default function SniperDashboard({ apiBase }) {
         </div>
 
         {/* Net Profit */}
-        <div className="sniper-card" style={{ background: 'rgba(255, 255, 255, 0.04)', border: `1px solid ${netProfit >= 0 ? 'rgba(16, 185, 129, 0.25)' : 'rgba(244, 63, 94, 0.25)'}` }}>
+        <div className="sniper-card" style={{ background: 'var(--glass-bg)', border: `1px solid ${netProfit >= 0 ? 'rgba(16, 185, 129, 0.25)' : 'rgba(244, 63, 94, 0.25)'}` }}>
           <div className="sniper-card-header">
             <span>已实现累计净收益</span>
             <TrendingUp size={18} style={{ color: netProfit >= 0 ? '#10b981' : '#f43f5e' }} />
@@ -499,7 +499,7 @@ export default function SniperDashboard({ apiBase }) {
         </div>
 
         {/* Leverage & Risk */}
-        <div className="sniper-card" style={{ background: 'rgba(255, 255, 255, 0.04)', border: '1px solid rgba(56, 189, 248, 0.25)' }}>
+        <div className="sniper-card" style={{ background: 'var(--glass-bg)', border: '1px solid rgba(56, 189, 248, 0.25)' }}>
           <div className="sniper-card-header">
             <span>风控偏好与杠杆模式</span>
             <ShieldAlert size={18} style={{ color: '#38bdf8' }} />
@@ -513,7 +513,7 @@ export default function SniperDashboard({ apiBase }) {
         </div>
 
         {/* Active Positions */}
-        <div className="sniper-card" style={{ background: 'rgba(255, 255, 255, 0.04)', border: '1px solid rgba(192, 132, 252, 0.25)' }}>
+        <div className="sniper-card" style={{ background: 'var(--glass-bg)', border: '1px solid rgba(192, 132, 252, 0.25)' }}>
           <div className="sniper-card-header">
             <span>实时埋伏/活跃仓位</span>
             <Layers size={18} style={{ color: '#c084fc' }} />
@@ -527,7 +527,7 @@ export default function SniperDashboard({ apiBase }) {
         </div>
 
         {/* Max Drawdown */}
-        <div className="sniper-card" style={{ background: 'rgba(255, 255, 255, 0.04)', border: '1px solid rgba(244, 63, 94, 0.25)' }}>
+        <div className="sniper-card" style={{ background: 'var(--glass-bg)', border: '1px solid rgba(244, 63, 94, 0.25)' }}>
           <div className="sniper-card-header">
             <span>历史最大回撤 (Max DD)</span>
             <Activity size={18} style={{ color: '#f43f5e' }} />
@@ -541,7 +541,7 @@ export default function SniperDashboard({ apiBase }) {
         </div>
 
         {/* Circuit Breaker & Trading Costs */}
-        <div className="sniper-card" style={{ background: 'rgba(255, 255, 255, 0.04)', border: `1px solid ${dashboardData?.circuit_breaker?.halted ? 'rgba(244, 63, 94, 0.25)' : 'rgba(16, 185, 129, 0.25)'}` }}>
+        <div className="sniper-card" style={{ background: 'var(--glass-bg)', border: `1px solid ${dashboardData?.circuit_breaker?.halted ? 'rgba(244, 63, 94, 0.25)' : 'rgba(16, 185, 129, 0.25)'}` }}>
           <div className="sniper-card-header">
             <span>日内熔断与交易成本</span>
             <ShieldAlert size={18} style={{ color: dashboardData?.circuit_breaker?.halted ? '#f43f5e' : '#10b981' }} />
@@ -971,7 +971,7 @@ export default function SniperDashboard({ apiBase }) {
             </div>
 
             {/* Sub-tabs inside modal */}
-            <div style={{ display: 'flex', gap: '0.5rem', background: 'rgba(0,0,0,0.03)', padding: '4px', borderRadius: '8px' }}>
+            <div style={{ display: 'flex', gap: '0.5rem', background: 'rgba(0, 0, 0, 0.25)', padding: '4px', borderRadius: '8px', border: '1px solid rgba(255, 255, 255, 0.08)' }}>
               <button
                 type="button"
                 className={`btn btn-secondary ${activeSubTab === 'general' ? 'active' : ''}`}
@@ -1081,7 +1081,7 @@ export default function SniperDashboard({ apiBase }) {
               </div>
 
               <div className="form-group">
-                <label className="form-label">触发狙击最低 AI 置信度 (1-10)</label>
+                <label className="form-label">触发狙击最低 AI 置信度 (1-12)</label>
                 <input
                   type="number"
                   min="5"

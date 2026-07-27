@@ -1,9 +1,10 @@
 import React, { useState, useEffect } from 'react';
-import { Activity, TrendingUp, Calendar, Newspaper, AlertTriangle, RefreshCw } from 'lucide-react';
+import { Activity, TrendingUp, Calendar, Newspaper, AlertTriangle, RefreshCw, ChevronDown, ChevronUp } from 'lucide-react';
 
 export default function SentimentPanel({ apiBase }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [isCollapsed, setIsCollapsed] = useState(true);
 
   const fetchSentiment = async () => {
     try {
@@ -53,17 +54,13 @@ export default function SentimentPanel({ apiBase }) {
 
   if (loading && !data) {
     return (
-      <div style={{
-        background: 'var(--glass-bg)',
-        border: '1px solid var(--glass-border)',
-        borderRadius: '12px',
+      <div className="panel" style={{
         padding: '1.5rem',
         marginBottom: '1rem',
         flexShrink: 0,
         textAlign: 'center',
         color: 'var(--text-muted)',
-        fontSize: '0.82rem',
-        backdropFilter: 'blur(30px)'
+        fontSize: '0.82rem'
       }}>
         正在加载市场情绪数据...
       </div>
@@ -73,19 +70,19 @@ export default function SentimentPanel({ apiBase }) {
   const risk = getRiskStyle(data?.risk_level || 'normal');
 
   return (
-    <div style={{
-      background: 'var(--glass-bg)',
-      border: '1px solid var(--glass-border)',
-      borderRadius: '12px',
+    <div className="panel" style={{
       padding: '1rem 1.25rem',
       marginBottom: '1rem',
-      flexShrink: 0,
-      backdropFilter: 'blur(30px)'
+      flexShrink: 0
     }}>
       {/* Header */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.85rem' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-          <Activity size={18} style={{ color: '#8944ab' }} />
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: isCollapsed ? '0' : '0.85rem' }}>
+        <div 
+          style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', userSelect: 'none' }} 
+          onClick={() => setIsCollapsed(!isCollapsed)}
+          title={isCollapsed ? "点击展开情绪面板" : "点击折叠情绪面板"}
+        >
+          {isCollapsed ? <ChevronDown size={18} style={{ color: '#c084fc' }} /> : <ChevronUp size={18} style={{ color: '#c084fc' }} />}
           <span style={{ fontWeight: 700, fontSize: '0.95rem', color: 'var(--text-bright)' }}>📡 市场情绪面实时监控</span>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
@@ -98,7 +95,7 @@ export default function SentimentPanel({ apiBase }) {
           </span>
           <span style={{
             padding: '3px 10px', borderRadius: '6px', fontSize: '0.72rem', fontWeight: 600,
-            background: 'rgba(175, 82, 222, 0.08)', color: '#8944ab', border: '1px solid rgba(175, 82, 222, 0.2)'
+            background: 'rgba(192, 132, 252, 0.12)', color: '#c084fc', border: '1px solid rgba(192, 132, 252, 0.25)'
           }}>
             策略建议: {getBiasLabel(data?.trading_bias)}
           </span>
@@ -113,9 +110,10 @@ export default function SentimentPanel({ apiBase }) {
       </div>
 
       {/* Content Grid */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '0.75rem' }}>
+      {!isCollapsed && (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '0.75rem' }}>
         {/* Fear & Greed */}
-        <div style={{ background: 'rgba(255, 255, 255, 0.03)', borderRadius: '8px', padding: '0.75rem', border: '1px solid rgba(255, 255, 255, 0.06)' }}>
+        <div style={{ background: 'rgba(255, 255, 255, 0.02)', borderRadius: '8px', padding: '0.75rem', border: '1px solid rgba(255, 255, 255, 0.05)' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '0.5rem', fontSize: '0.72rem', color: 'var(--text-muted)' }}>
             <TrendingUp size={13} />
             <span>恐惧 & 贪婪指数</span>
@@ -147,7 +145,7 @@ export default function SentimentPanel({ apiBase }) {
         </div>
 
         {/* Funding Rates */}
-        <div style={{ background: 'rgba(255, 255, 255, 0.03)', borderRadius: '8px', padding: '0.75rem', border: '1px solid rgba(255, 255, 255, 0.06)' }}>
+        <div style={{ background: 'rgba(255, 255, 255, 0.02)', borderRadius: '8px', padding: '0.75rem', border: '1px solid rgba(255, 255, 255, 0.05)' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '0.5rem', fontSize: '0.72rem', color: 'var(--text-muted)' }}>
             <Activity size={13} />
             <span>资金费率 (Funding Rate)</span>
@@ -159,7 +157,7 @@ export default function SentimentPanel({ apiBase }) {
                   <span style={{ color: 'var(--text-bright)', fontWeight: 500 }}>{sym.replace('/USDT', '')}</span>
                   <span style={{
                     fontFamily: 'monospace', fontWeight: 600,
-                    color: rate > 0.0003 ? '#d70015' : rate < -0.0003 ? '#248a3d' : 'var(--text-muted)'
+                    color: rate > 0.0003 ? '#f43f5e' : rate < -0.0003 ? '#10b981' : 'var(--text-muted)'
                   }}>
                     {(rate * 100).toFixed(4)}%
                     {Math.abs(rate) > 0.0005 && <span style={{ marginLeft: '3px', fontSize: '0.65rem' }}>⚡</span>}
@@ -176,7 +174,7 @@ export default function SentimentPanel({ apiBase }) {
         </div>
 
         {/* Macro Events */}
-        <div style={{ background: 'rgba(255, 255, 255, 0.03)', borderRadius: '8px', padding: '0.75rem', border: '1px solid rgba(255, 255, 255, 0.06)' }}>
+        <div style={{ background: 'rgba(255, 255, 255, 0.02)', borderRadius: '8px', padding: '0.75rem', border: '1px solid rgba(255, 255, 255, 0.05)' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '0.5rem', fontSize: '0.72rem', color: 'var(--text-muted)' }}>
             <Calendar size={13} />
             <span>宏观经济事件</span>
@@ -184,7 +182,7 @@ export default function SentimentPanel({ apiBase }) {
           {data?.macro_event ? (
             <div>
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-                <AlertTriangle size={14} style={{ color: data.macro_event.impact === 'critical' ? '#d70015' : '#b25000' }} />
+                <AlertTriangle size={14} style={{ color: data.macro_event.impact === 'critical' ? '#f43f5e' : '#f59e0b' }} />
                 <span style={{ fontSize: '0.82rem', fontWeight: 600, color: 'var(--text-bright)' }}>
                   {data.macro_event.event}
                 </span>
@@ -197,19 +195,19 @@ export default function SentimentPanel({ apiBase }) {
               <span style={{
                 display: 'inline-block', marginTop: '0.3rem', padding: '1px 6px', borderRadius: '4px',
                 fontSize: '0.65rem', fontWeight: 600,
-                background: data.macro_event.impact === 'critical' ? 'rgba(255,59,48,0.1)' : 'rgba(255,149,0,0.1)',
-                color: data.macro_event.impact === 'critical' ? '#d70015' : '#b25000'
+                background: data.macro_event.impact === 'critical' ? 'rgba(244, 63, 94, 0.12)' : 'rgba(245, 158, 11, 0.12)',
+                color: data.macro_event.impact === 'critical' ? '#f43f5e' : '#f59e0b'
               }}>
                 影响力: {data.macro_event.impact === 'critical' ? '极高' : data.macro_event.impact === 'high' ? '高' : '中'}
               </span>
             </div>
           ) : (
-            <div style={{ color: '#248a3d', fontSize: '0.78rem' }}>✅ 24h 内无重大宏观事件</div>
+            <div style={{ color: '#10b981', fontSize: '0.78rem' }}>✅ 24h 内无重大宏观事件</div>
           )}
         </div>
 
         {/* News Headlines */}
-        <div style={{ background: 'rgba(255, 255, 255, 0.03)', borderRadius: '8px', padding: '0.75rem', border: '1px solid rgba(255, 255, 255, 0.06)' }}>
+        <div style={{ background: 'rgba(255, 255, 255, 0.02)', borderRadius: '8px', padding: '0.75rem', border: '1px solid rgba(255, 255, 255, 0.05)' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '0.5rem', fontSize: '0.72rem', color: 'var(--text-muted)' }}>
             <Newspaper size={13} />
             <span>加密市场快讯</span>
@@ -218,7 +216,7 @@ export default function SentimentPanel({ apiBase }) {
             <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
               {data.news.slice(0, 4).map((item, idx) => (
                 <div key={idx} style={{ fontSize: '0.72rem', color: 'var(--text-bright)', lineHeight: '1.3', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  <span style={{ color: '#8944ab', marginRight: '4px' }}>•</span>
+                  <span style={{ color: '#c084fc', marginRight: '4px' }}>•</span>
                   {item.title}
                 </div>
               ))}
@@ -228,6 +226,7 @@ export default function SentimentPanel({ apiBase }) {
           )}
         </div>
       </div>
-    </div>
+    )}
+  </div>
   );
 }

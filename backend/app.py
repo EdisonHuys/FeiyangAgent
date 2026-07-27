@@ -2,6 +2,7 @@ import os
 import json
 import yaml
 import logging
+import uuid
 import pandas as pd
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -126,6 +127,10 @@ def save_signals_state(state: dict):
             logger.warning(f"Failed to save signal state file: {e}")
 
 reports_lock = threading.Lock()
+
+# ─── Async analysis task store (manual diagnosis) ───
+analysis_tasks: Dict[str, Dict[str, Any]] = {}
+analysis_tasks_lock = threading.Lock()
 
 def process_signal_evaluation(symbol: str, payload: dict, json_signal: dict, markdown_report: str, yaml_cfg: dict, source_tag: str = "24H盯盘"):
     """
@@ -719,67 +724,106 @@ def get_sentiment_data():
 @app.post("/api/analyze")
 def run_analysis(req: AnalysisRequest):
     """
-    Run full prediction pipeline: fetch market data -> compute indicators -> call LLM -> notify -> return response
+    Kick off async diagnosis: returns a task_id immediately so the frontend
+    can poll /api/analyze/status/{task_id}. This avoids WKWebView fetch timeout
+    ("Load failed") caused by LLM calls taking 30-60+ seconds.
     """
     symbol = req.symbol
-    logger.info(f"Triggering diagnostic analysis for symbol: {symbol}")
-    log_monitor_event(f"⚡ [手动触发] 手动开启 {symbol} 诊断，正在拉取 K 线并计算指标...")
-    
-    # 1. Fetch market data (bypass cache so the LLM always sees fresh data)
-    market_data = get_market_data(symbol, force_refresh=True)
-    payload = market_data["payload"]
-    
-    # 2. Setup Agent
-    load_dotenv(ENV_PATH, override=True)
-    api_key = os.getenv("OPENAI_API_KEY")
-    api_base = os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1")
-    
-    if not api_key or api_key == "your-llm-api-key":
-        raise HTTPException(
-            status_code=400, 
-            detail="大模型 API Key 尚未配置，请在设置中填写并保存！"
-        )
-        
-    yaml_cfg = load_yaml_config()
-    llm_cfg = yaml_cfg.get("llm", {})
-    model_name = llm_cfg.get("model", "gpt-4o")
-    temperature = llm_cfg.get("temperature", 0.1)
-    max_tokens = llm_cfg.get("max_tokens", 3000)
-    
-    agent = FeiyangAgent(
-        api_key=api_key,
-        api_base=api_base,
-        model_name=model_name,
-        temperature=temperature,
-        max_tokens=max_tokens,
-        system_prompt=load_system_prompt(root_dir),
-        root_dir=root_dir
-    )
+    task_id = str(uuid.uuid4())
 
-    # 3. Call LLM (with dual-call consensus if enabled)
-    try:
-        consensus_on = yaml_cfg.get("llm", {}).get("consensus_enabled", True)
-        json_signal, markdown_report = agent.analyze_with_consensus(payload, consensus_enabled=consensus_on)
-    except Exception as e:
-        logger.error(f"LLM analyze error: {e}")
-        log_monitor_event(f"❌ [手动诊断失败] {symbol}。原因：{str(e)}")
-        raise HTTPException(status_code=500, detail=f"LLM 诊断失败: {str(e)}")
-        
-    # 4. Process signal evaluation & send notification
-    try:
-        process_signal_evaluation(symbol, payload, json_signal, markdown_report, yaml_cfg, source_tag="手动诊断")
-    except Exception as e:
-        logger.warning(f"Notification delivery failed: {e}")
-        
-    sig_label = json_signal.get("signal_type", "wait").upper()
-    conf = json_signal.get("confidence_score", 0)
-    log_monitor_event(f"✅ [手动诊断成功] {symbol} 诊断完成。交易决策：{sig_label}，置信度：{conf}/12。")
-        
-    return {
-        "status": "success",
-        "signal": json_signal,
-        "report": markdown_report
-    }
+    with analysis_tasks_lock:
+        analysis_tasks[task_id] = {"status": "processing", "symbol": symbol, "result": None, "error": None}
+
+    logger.info(f"Triggering diagnostic analysis for symbol: {symbol} (task={task_id})")
+    log_monitor_event(f"⚡ [手动触发] 手动开启 {symbol} 诊断，正在拉取 K 线并计算指标...")
+
+    def _worker():
+        try:
+            # 1. Fetch market data (bypass cache so the LLM always sees fresh data)
+            market_data = get_market_data(symbol, force_refresh=True)
+            payload = market_data["payload"]
+
+            # 2. Setup Agent
+            load_dotenv(ENV_PATH, override=True)
+            api_key = os.getenv("OPENAI_API_KEY")
+            api_base = os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1")
+
+            if not api_key or api_key == "your-llm-api-key":
+                raise RuntimeError("大模型 API Key 尚未配置，请在设置中填写并保存！")
+
+            yaml_cfg = load_yaml_config()
+            llm_cfg = yaml_cfg.get("llm", {})
+            model_name = llm_cfg.get("model", "gpt-4o")
+            temperature = llm_cfg.get("temperature", 0.1)
+            max_tokens = llm_cfg.get("max_tokens", 3000)
+
+            agent = FeiyangAgent(
+                api_key=api_key,
+                api_base=api_base,
+                model_name=model_name,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                system_prompt=load_system_prompt(root_dir),
+                root_dir=root_dir
+            )
+
+            # 3. Call LLM (with dual-call consensus if enabled)
+            consensus_on = yaml_cfg.get("llm", {}).get("consensus_enabled", True)
+            json_signal, markdown_report = agent.analyze_with_consensus(payload, consensus_enabled=consensus_on)
+
+            # 4. Process signal evaluation & send notification
+            try:
+                process_signal_evaluation(symbol, payload, json_signal, markdown_report, yaml_cfg, source_tag="手动诊断")
+            except Exception as e:
+                logger.warning(f"Notification delivery failed: {e}")
+
+            sig_label = json_signal.get("signal_type", "wait").upper()
+            conf = json_signal.get("confidence_score", 0)
+            log_monitor_event(f"✅ [手动诊断成功] {symbol} 诊断完成。交易决策：{sig_label}，置信度：{conf}/12。")
+
+            with analysis_tasks_lock:
+                analysis_tasks[task_id]["status"] = "done"
+                analysis_tasks[task_id]["result"] = {
+                    "status": "success",
+                    "signal": json_signal,
+                    "report": markdown_report
+                }
+        except Exception as e:
+            logger.error(f"LLM analyze error: {e}")
+            log_monitor_event(f"❌ [手动诊断失败] {symbol}。原因：{str(e)}")
+            with analysis_tasks_lock:
+                analysis_tasks[task_id]["status"] = "error"
+                analysis_tasks[task_id]["error"] = str(e)
+
+    worker = threading.Thread(target=_worker, daemon=True)
+    worker.start()
+
+    return {"task_id": task_id, "status": "processing"}
+
+
+@app.get("/api/analyze/status/{task_id}")
+def get_analysis_status(task_id: str):
+    """
+    Poll endpoint: frontend checks this until status == 'done' or 'error'.
+    """
+    with analysis_tasks_lock:
+        task = analysis_tasks.get(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    if task["status"] == "done":
+        result = task["result"]
+        # Clean up finished task after returning
+        with analysis_tasks_lock:
+            analysis_tasks.pop(task_id, None)
+        return result
+    elif task["status"] == "error":
+        error_msg = task["error"]
+        with analysis_tasks_lock:
+            analysis_tasks.pop(task_id, None)
+        raise HTTPException(status_code=500, detail=f"LLM 诊断失败: {error_msg}")
+    else:
+        return {"status": "processing"}
 
 class LLMTestRequest(BaseModel):
     openai_api_key: str

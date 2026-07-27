@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { AreaChart, Settings, Play, ShieldAlert, CheckCircle2, TrendingUp, HelpCircle, Target, History, Brain } from 'lucide-react';
 import KLineChart from './components/KLineChart';
 import SettingsPanel from './components/SettingsPanel';
@@ -159,6 +159,15 @@ export default function App() {
     }
   }, [monitorLogs]);
 
+  // 6. Cleanup diagnosis polling on unmount
+  useEffect(() => {
+    return () => {
+      if (diagPollRef.current) {
+        clearInterval(diagPollRef.current);
+      }
+    };
+  }, []);
+
   const handleClearLogs = () => {
     setMonitorLogs([]);
     fetch(`${API_BASE}/api/monitor-logs/clear`, { method: 'POST' })
@@ -181,10 +190,18 @@ export default function App() {
   };
 
   // Run LLM diagnostics
+  const diagPollRef = useRef(null);
+
   const handleRunDiagnostics = () => {
     setDiagLoading(true);
     setDiagError(null);
     setPrediction(null);
+
+    // Stop any previous polling
+    if (diagPollRef.current) {
+      clearInterval(diagPollRef.current);
+      diagPollRef.current = null;
+    }
 
     fetch(`${API_BASE}/api/analyze`, {
       method: 'POST',
@@ -200,8 +217,36 @@ export default function App() {
         return res.json();
       })
       .then(data => {
-        setPrediction(data);
-        setDiagLoading(false);
+        const taskId = data.task_id;
+        if (!taskId) throw new Error("服务器未返回任务 ID");
+
+        // Poll for completion every 2 seconds
+        diagPollRef.current = setInterval(() => {
+          fetch(`${API_BASE}/api/analyze/status/${taskId}`)
+            .then(res => {
+              if (!res.ok) {
+                return res.json().then(errData => {
+                  throw new Error(errData.detail || "LLM 诊断失败。");
+                });
+              }
+              return res.json();
+            })
+            .then(result => {
+              if (result.status === 'processing') return; // still running
+              // Done or error (error throws above via !res.ok)
+              clearInterval(diagPollRef.current);
+              diagPollRef.current = null;
+              setPrediction(result);
+              setDiagLoading(false);
+            })
+            .catch(err => {
+              clearInterval(diagPollRef.current);
+              diagPollRef.current = null;
+              console.error(err);
+              setDiagError(err.message);
+              setDiagLoading(false);
+            });
+        }, 2000);
       })
       .catch(err => {
         console.error(err);
