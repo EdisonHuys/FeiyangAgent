@@ -28,6 +28,30 @@ export default function KLineChart({ data }) {
 
     if (cleanData.length === 0) return;
 
+    // Determine precision based on last price close
+    const lastPrice = cleanData[cleanData.length - 1]?.close || 1;
+    let precision = 2;
+    let minMove = 0.01;
+    if (lastPrice < 1) {
+      precision = 6;
+      minMove = 0.000001;
+    } else if (lastPrice < 10) {
+      precision = 4;
+      minMove = 0.0001;
+    } else if (lastPrice < 100) {
+      precision = 3;
+      minMove = 0.001;
+    } else {
+      precision = 2;
+      minMove = 0.01;
+    }
+
+    const priceFormatOptions = {
+      type: 'price',
+      precision,
+      minMove,
+    };
+
     // Determine initial dimensions. Default to 600px if layout is still reflowing (0 width)
     // Passing 0 or negative values to WebKit canvas drawing contexts will crash WebKit on macOS.
     const initialWidth = chartContainerRef.current.clientWidth > 100 
@@ -61,9 +85,37 @@ export default function KLineChart({ data }) {
         },
       },
       timeScale: {
+        rightOffset: 15,
         borderColor: 'rgba(255, 255, 255, 0.08)',
         timeVisible: true,
         secondsVisible: false,
+        tickMarkFormatter: (time, tickMarkType, locale) => {
+          const date = new Date(time * 1000);
+          if (tickMarkType === 0) {
+            return date.toLocaleDateString('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric' });
+          } else if (tickMarkType === 1) {
+            return date.toLocaleDateString('zh-CN', { timeZone: 'Asia/Shanghai', month: 'short' });
+          } else if (tickMarkType === 2) {
+            return date.toLocaleDateString('zh-CN', { timeZone: 'Asia/Shanghai', day: 'numeric' }) + '日';
+          } else {
+            return date.toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', hour12: false });
+          }
+        }
+      },
+      localization: {
+        locale: 'zh-CN',
+        timeFormatter: (time) => {
+          const date = new Date(time * 1000);
+          return date.toLocaleString('zh-CN', {
+            timeZone: 'Asia/Shanghai',
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: false
+          });
+        }
       },
       rightPriceScale: {
         borderColor: 'rgba(255, 255, 255, 0.08)',
@@ -81,6 +133,7 @@ export default function KLineChart({ data }) {
       borderVisible: false,
       wickUpColor: '#10b981',
       wickDownColor: '#f43f5e',
+      priceFormat: priceFormatOptions,
     });
 
     // 4. Add Volume Series (Using v5 addSeries API)
@@ -97,15 +150,15 @@ export default function KLineChart({ data }) {
     });
 
     // 5. Add Indicator Line Series (Using v5 addSeries API)
-    const ma5Series = chart.addSeries(LineSeries, { color: '#ff9500', lineWidth: 1.5, title: 'MA5' });
-    const ma10Series = chart.addSeries(LineSeries, { color: '#007aff', lineWidth: 1.5, title: 'MA10' });
-    const ma30Series = chart.addSeries(LineSeries, { color: '#af52de', lineWidth: 1.5, title: 'MA30' });
-    const ema55Series = chart.addSeries(LineSeries, { color: '#ff3b30', lineWidth: 2, title: 'EMA55' });
+    const ma5Series = chart.addSeries(LineSeries, { color: '#f59e0b', lineWidth: 1.5, title: 'MA5', priceFormat: priceFormatOptions });
+    const ma10Series = chart.addSeries(LineSeries, { color: '#38bdf8', lineWidth: 1.5, title: 'MA10', priceFormat: priceFormatOptions });
+    const ma30Series = chart.addSeries(LineSeries, { color: '#c084fc', lineWidth: 1.5, title: 'MA30', priceFormat: priceFormatOptions });
+    const ema55Series = chart.addSeries(LineSeries, { color: '#f43f5e', lineWidth: 2, title: 'EMA55', priceFormat: priceFormatOptions });
     
     // Bollinger Bands Lines (Muted styles)
-    const bbUpperSeries = chart.addSeries(LineSeries, { color: 'rgba(142, 142, 147, 0.4)', lineWidth: 1, lineStyle: 2, title: 'BB Upper' });
-    const bbMiddleSeries = chart.addSeries(LineSeries, { color: 'rgba(142, 142, 147, 0.25)', lineWidth: 1, lineStyle: 1 });
-    const bbLowerSeries = chart.addSeries(LineSeries, { color: 'rgba(142, 142, 147, 0.4)', lineWidth: 1, lineStyle: 2, title: 'BB Lower' });
+    const bbUpperSeries = chart.addSeries(LineSeries, { color: 'rgba(142, 142, 147, 0.4)', lineWidth: 1, lineStyle: 2, title: 'BB Upper', priceFormat: priceFormatOptions });
+    const bbMiddleSeries = chart.addSeries(LineSeries, { color: 'rgba(142, 142, 147, 0.25)', lineWidth: 1, lineStyle: 1, priceFormat: priceFormatOptions });
+    const bbLowerSeries = chart.addSeries(LineSeries, { color: 'rgba(142, 142, 147, 0.4)', lineWidth: 1, lineStyle: 2, title: 'BB Lower', priceFormat: priceFormatOptions });
 
     // 6. Map and Load Data
     const candleData = cleanData.map(d => ({
@@ -148,7 +201,7 @@ export default function KLineChart({ data }) {
     if (visibleBarCount > 0) {
       chart.timeScale().setVisibleLogicalRange({
         from: cleanData.length - visibleBarCount,
-        to: cleanData.length + 3, // Right-side margin
+        to: cleanData.length + 15, // Move chart to the left by leaving 15 empty slots on the right
       });
     } else {
       chart.timeScale().fitContent();

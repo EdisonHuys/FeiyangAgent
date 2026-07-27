@@ -983,13 +983,18 @@ class SniperEngine:
             margin_usd = balance * 0.25
             pos_value_usd = margin_usd * suggested_lev
 
-        # 🎯 10U Micro-Capital Auto-Protector ($10U - $20U 小资金适配)
-        # Ensure position notional value is at least $6.00 to pass Binance 5U / OKX 10U minimum notional filter
-        if balance <= 20.0:
-            min_pos_value = 6.0
-            if pos_value_usd < min_pos_value:
-                pos_value_usd = min_pos_value
-                margin_usd = round(pos_value_usd / suggested_lev, 2)
+        # 🎯 Exchange Minimum Notional Auto-Protector
+        # Ensure position notional value is at least $21.00 to pass Binance 20U / OKX 10U minimum notional filter.
+        # For high-priced assets, we scale up dynamically to meet minimum lot size requirements (e.g. 0.001 BTC / 0.01 ETH).
+        min_pos_value = 21.0
+        if entry_price > 30000.0:
+            min_pos_value = max(min_pos_value, 0.0011 * entry_price)
+        elif entry_price > 1000.0:
+            min_pos_value = max(min_pos_value, 0.011 * entry_price)
+
+        if pos_value_usd < min_pos_value:
+            pos_value_usd = min_pos_value
+            margin_usd = round(pos_value_usd / suggested_lev, 2)
 
         return round(pos_value_usd, 2), round(margin_usd, 2), suggested_lev
 
@@ -1606,7 +1611,22 @@ class SniperEngine:
                     logger.warning(f"[LiveSniper] set_leverage failed: {lev_e}")
 
                 side = "buy" if sig_type == "long" else "sell"
+                
+                try:
+                    exchange.load_markets()
+                    market = exchange.market(ccxt_symbol)
+                    min_amount = market.get('limits', {}).get('amount', {}).get('min', 0.001)
+                except Exception:
+                    min_amount = 0.001
+
                 raw_amount = pos_val / planned_entry
+                if raw_amount < min_amount:
+                    raw_amount = min_amount
+                    pos_val = raw_amount * planned_entry
+                    margin = pos_val / lev
+                    new_trade["position_size_usd"] = round(pos_val, 2)
+                    new_trade["margin_usd"] = round(margin, 2)
+
                 try:
                     amount = float(exchange.amount_to_precision(ccxt_symbol, raw_amount))
                 except Exception:
