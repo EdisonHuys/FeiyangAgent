@@ -248,6 +248,8 @@ class SniperEngine:
                     exchange, ex_id = self._init_live_ccxt()
                     ccxt_symbol = f"{t['symbol']}:USDT" if ":" not in t['symbol'] else t['symbol']
                     exchange.cancel_order(t["live_order_id"], ccxt_symbol)
+                    # Clean up SL/TP conditional orders attached to the cancelled pending order
+                    self._cancel_all_conditional_orders_for_symbol(t["symbol"])
                 except Exception as e:
                     # Keep it tracked: fills are blocked by the halt guard, and
                     # the live-order sync keeps watching the exchange order.
@@ -268,6 +270,8 @@ class SniperEngine:
                             exchange, ex_id = self._init_live_ccxt()
                             ccxt_symbol = f"{t['symbol']}:USDT" if ":" not in t['symbol'] else t['symbol']
                             exchange.cancel_order(t["live_order_id"], ccxt_symbol)
+                            # Clean up SL/TP conditional orders attached to the cancelled pending order
+                            self._cancel_all_conditional_orders_for_symbol(t["symbol"])
                         except Exception as cancel_e:
                             logger.warning(f"[LiveSniper] Cancel order for removed symbol {t['symbol']} failed: {cancel_e}")
                     t["status"] = "cancelled"
@@ -1154,6 +1158,8 @@ class SniperEngine:
                     exchange, ex_id = self._init_live_ccxt()
                     ccxt_symbol = f"{symbol}:USDT" if ":" not in symbol else symbol
                     exchange.cancel_order(trade["live_order_id"], ccxt_symbol)
+                    # Clean up SL/TP conditional orders attached to the cancelled pending order
+                    self._cancel_all_conditional_orders_for_symbol(symbol)
                 except Exception as cancel_e:
                     logger.warning(f"[LiveSniper] Cancel live order error: {cancel_e}")
                     return {"status": "error", "message": f"交易所撤单失败：{cancel_e}。该挂单可能仍在交易所生效，请前往交易所核实。"}
@@ -1430,6 +1436,8 @@ class SniperEngine:
                             ccxt_symbol = f"{symbol}:USDT" if ":" not in symbol else symbol
                             exchange.cancel_order(old_t["live_order_id"], ccxt_symbol)
                             logger.info(f"[LiveSniper] 🔄 成功撤销旧的未成交 {ex_id.upper()} 挂单 #{old_t['live_order_id']} ({symbol})")
+                            # Clean up SL/TP conditional orders attached to the cancelled pending order
+                            self._cancel_all_conditional_orders_for_symbol(symbol)
                         except Exception as cancel_e:
                             logger.warning(f"[LiveSniper] ⚠️ 撤销旧挂单失败: {cancel_e} — 保留原挂单继续跟踪，跳过本次替换")
                             return None
@@ -1638,6 +1646,12 @@ class SniperEngine:
                     limit_price = planned_entry
 
                 pos_side = "LONG" if sig_type == "long" else "SHORT"
+
+                # 🧹 Defensive cleanup: remove any orphaned conditional orders
+                # (SL/TP) left over from previously cancelled pending orders for
+                # this symbol, so they don't interfere with the new position.
+                self._cancel_all_conditional_orders_for_symbol(symbol)
+
                 order_params = {}
                 if ex_id == "binance":
                     order_params = {
@@ -1872,6 +1886,8 @@ class SniperEngine:
                                 exchange, ex_id = self._init_live_ccxt()
                                 ccxt_symbol = f"{symbol}:USDT" if ":" not in symbol else symbol
                                 exchange.cancel_order(t["live_order_id"], ccxt_symbol)
+                                # Clean up SL/TP conditional orders attached to the expired pending order
+                                self._cancel_all_conditional_orders_for_symbol(symbol)
                             except Exception as e:
                                 logger.warning(f"[LiveSniper] TTL cancel failed for {symbol}: {e} — 保留挂单，下一 tick 重试")
                                 continue
@@ -1894,6 +1910,15 @@ class SniperEngine:
                     crossed_entry = high_price >= planned_entry
 
                 if invalidated:
+                    # Cancel the live order and its attached conditional orders on the exchange
+                    if t.get("is_live") and t.get("live_order_id"):
+                        try:
+                            exchange, ex_id = self._init_live_ccxt()
+                            ccxt_symbol = f"{symbol}:USDT" if ":" not in symbol else symbol
+                            exchange.cancel_order(t["live_order_id"], ccxt_symbol)
+                            self._cancel_all_conditional_orders_for_symbol(symbol)
+                        except Exception as inv_e:
+                            logger.warning(f"[LiveSniper] Invalidated cancel failed for {symbol}: {inv_e}")
                     t["status"] = "cancelled"
                     t["close_reason"] = f"⚠️ 价格 (${low_price if sig_type == 'long' else high_price}) 未回踩埋伏位，先行穿透防守线 (${sl})，结构破坏挂单自动作废"
                     updated = True
