@@ -893,6 +893,11 @@ class SniperConfigRequest(BaseModel):
     min_leverage: Optional[int] = None
     max_leverage: Optional[int] = None
     fixed_leverage: Optional[int] = None
+    margin_mode: Optional[str] = None
+    margin_percent: Optional[float] = None
+    fixed_margin_amount: Optional[float] = None
+    max_profit_drawdown_percent: Optional[float] = None
+    enable_exchange_sl: Optional[bool] = None
     live_exchange: Optional[str] = None
     live_api_key: Optional[str] = None
     live_secret: Optional[str] = None

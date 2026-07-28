@@ -57,6 +57,11 @@ class SniperEngine:
                 "min_leverage": 20,
                 "max_leverage": 50,
                 "fixed_leverage": 30,
+                "margin_mode": "smart",  # "smart", "account_percent", "fixed_amount"
+                "margin_percent": 5.0,
+                "fixed_margin_amount": 20.0,
+                "max_profit_drawdown_percent": 30.0,
+                "enable_exchange_sl": True,
                 "live_exchange": "binance",
                 "live_api_key": "",
                 "live_secret": "",
@@ -292,20 +297,53 @@ class SniperEngine:
         """
         if not stop_loss or amount <= 0:
             return None
+
+        cfg = self.state.get("config", {})
+        if not cfg.get("enable_exchange_sl", True):
+            logger.info(f"[LiveSniper] 交易所侧同步挂止损单已根据设置关闭 ({symbol})")
+            return None
+
         ccxt_symbol = f"{symbol}:USDT" if ":" not in symbol else symbol
         close_side = "sell" if sig_type == "long" else "buy"
         pos_side = "LONG" if sig_type == "long" else "SHORT"
         try:
             if ex_id == "binance":
-                # Use closePosition=True: closes the FULL position on trigger,
-                # no need to specify amount → avoids minimum lot size rejection
-                res = exchange.create_order(
-                    symbol=ccxt_symbol,
-                    type="STOP_MARKET",
-                    side=close_side,
-                    amount=None,
-                    params={"positionSide": pos_side, "stopPrice": stop_loss, "closePosition": True}
-                )
+                # Binance Futures API: positionSide depends on account setting (Hedge vs One-way mode).
+                # Retry with 'BOTH' or without positionSide if code -4061 (position side mismatch) is encountered.
+                try:
+                    res = exchange.create_order(
+                        symbol=ccxt_symbol,
+                        type="STOP_MARKET",
+                        side=close_side,
+                        amount=None,
+                        params={"positionSide": pos_side, "stopPrice": stop_loss, "closePosition": True}
+                    )
+                except Exception as b_err:
+                    err_str = str(b_err)
+                    if "-4061" in err_str or "position side" in err_str.lower():
+                        logger.info(f"[LiveSniper] Binance -4061 模式不匹配，尝试按单向持仓模式 (positionSide='BOTH') 重新下止损单...")
+                        try:
+                            res = exchange.create_order(
+                                symbol=ccxt_symbol,
+                                type="STOP_MARKET",
+                                side=close_side,
+                                amount=None,
+                                params={"positionSide": "BOTH", "stopPrice": stop_loss, "closePosition": True}
+                            )
+                        except Exception as b_err2:
+                            if "-4061" in str(b_err2) or "position side" in str(b_err2).lower():
+                                logger.info(f"[LiveSniper] Binance -4061 尝试去除 positionSide 参数重新下单...")
+                                res = exchange.create_order(
+                                    symbol=ccxt_symbol,
+                                    type="STOP_MARKET",
+                                    side=close_side,
+                                    amount=None,
+                                    params={"stopPrice": stop_loss, "closePosition": True}
+                                )
+                            else:
+                                raise b_err2
+                    else:
+                        raise b_err
             else:
                 # Other exchanges: validate amount against market minimum
                 try:
@@ -351,7 +389,9 @@ class SniperEngine:
         """
         ACTIVATION_THRESHOLD = 12.0   # minimum PnL% to activate trailing stop (lowered for faster protection)
         MIN_PEAK_STEP       = 3.0     # min peak advance (%) before updating SL (more responsive)
-        LOCK_RATIO          = 0.55    # lock in 55% of peak gains (stronger profit protection)
+
+        cfg = self.state.get("config", {})
+        max_drawdown_pct = float(cfg.get("max_profit_drawdown_percent", 30.0) or 30.0)
 
         # Update the stored peak PnL if we have a new high
         old_peak = t.get("peak_pnl_pct", 0.0)
@@ -364,12 +404,23 @@ class SniperEngine:
         if peak < ACTIVATION_THRESHOLD:
             return False
 
+        # Tiered LOCK_RATIO:
+        # - Peak < 30%: Lock 50% of peak gains (protect capital / small profit)
+        # - 30% <= Peak < 100%: Lock 60% of peak gains
+        # - Peak >= 100%: Lock (100% - max_drawdown_pct), default 70% (withstand max 30% giveback)
+        if peak >= 100.0:
+            LOCK_RATIO = max(0.65, 1.0 - (max_drawdown_pct / 100.0))
+        elif peak >= 30.0:
+            LOCK_RATIO = 0.60
+        else:
+            LOCK_RATIO = 0.50
+
         # Only update SL when the peak has advanced meaningfully since last update
         last_peak_at_update = t.get("trailing_sl_level", 0.0)
         if peak - last_peak_at_update < MIN_PEAK_STEP:
             return False
 
-        # New SL locks in 50% of peak gains
+        # New SL locks in calculated ratio of peak gains
         lock_in_pct = peak * LOCK_RATIO
         price_move_ratio = lock_in_pct / 100.0 / lev
         if sig_type == "long":
@@ -1030,31 +1081,33 @@ class SniperEngine:
             else:
                 suggested_lev = min_lev
 
-        # Confidence-scaled risk: higher confidence → slightly more risk allocation
-        # conf 7 → 0.8x, conf 8 → 1.0x, conf 9+ → 1.2x of base risk
-        conf_risk_mult = 0.8 + (min(confidence, 10) - 7) * 0.133  # 7→0.8, 8→0.93, 9→1.07, 10→1.2
-        conf_risk_mult = max(0.6, min(1.3, conf_risk_mult))
-        risk_amount = balance * (risk_pct / 100.0) * conf_risk_mult
+        # Check margin_mode: "smart", "account_percent", "fixed_amount"
+        margin_mode = cfg.get("margin_mode", "smart")
 
-        sl_distance_pct = abs(entry_price - stop_loss) / entry_price if entry_price > 0 else 0.02
-        if sl_distance_pct <= 0.001:
-            sl_distance_pct = 0.01
-
-        # 🛡️ Anti-liquidation leverage cap: (Disabled per user request to strictly follow configured leverage)
-        # max_safe_lev = max(1, int(0.75 / sl_distance_pct))
-        # if suggested_lev > max_safe_lev:
-        #     logger.info(
-        #         f"[SniperEngine] Leverage safety cap: {suggested_lev}x -> {max_safe_lev}x "
-        #         f"(SL distance {round(sl_distance_pct * 100, 2)}%)"
-        #     )
-        #     suggested_lev = max_safe_lev
-
-        pos_value_usd = risk_amount / sl_distance_pct
-        margin_usd = pos_value_usd / suggested_lev
-
-        if margin_usd > balance * 0.25:
-            margin_usd = balance * 0.25
+        if margin_mode == "account_percent":
+            margin_pct = float(cfg.get("margin_percent", 5.0) or 5.0)
+            margin_usd = balance * (margin_pct / 100.0)
             pos_value_usd = margin_usd * suggested_lev
+        elif margin_mode == "fixed_amount":
+            fixed_amt = float(cfg.get("fixed_margin_amount", 20.0) or 20.0)
+            margin_usd = fixed_amt
+            pos_value_usd = margin_usd * suggested_lev
+        else:
+            # "smart" mode: risk-scaled sizing based on stop loss distance
+            conf_risk_mult = 0.8 + (min(confidence, 10) - 7) * 0.133  # 7→0.8, 8→0.93, 9→1.07, 10→1.2
+            conf_risk_mult = max(0.6, min(1.3, conf_risk_mult))
+            risk_amount = balance * (risk_pct / 100.0) * conf_risk_mult
+
+            sl_distance_pct = abs(entry_price - stop_loss) / entry_price if entry_price > 0 else 0.02
+            if sl_distance_pct <= 0.001:
+                sl_distance_pct = 0.01
+
+            pos_value_usd = risk_amount / sl_distance_pct
+            margin_usd = pos_value_usd / suggested_lev
+
+            if margin_usd > balance * 0.25:
+                margin_usd = balance * 0.25
+                pos_value_usd = margin_usd * suggested_lev
 
         # 🎯 Exchange Minimum Notional Auto-Protector
         # Ensure position notional value is at least $21.00 to pass Binance 20U / OKX 10U minimum notional filter.

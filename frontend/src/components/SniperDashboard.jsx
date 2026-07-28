@@ -17,6 +17,11 @@ export default function SniperDashboard({ apiBase }) {
     mode: 'paper',
     account_balance: 10000,
     risk_per_trade_percent: 2.0,
+    margin_mode: 'smart',
+    margin_percent: 5.0,
+    fixed_margin_amount: 20.0,
+    max_profit_drawdown_percent: 30.0,
+    enable_exchange_sl: true,
     max_active_trades: 3,
     min_confidence: 7,
     max_leverage: 15,
@@ -508,7 +513,13 @@ export default function SniperDashboard({ apiBase }) {
             {formConfig.leverage_mode === 'fixed' ? `${formConfig.fixed_leverage || 50}x (固定)` : `${formConfig.min_leverage || 35}-${formConfig.max_leverage || 70}x (智能)`}
           </div>
           <div className="sniper-card-sub">
-            单笔硬性风控上限: <strong style={{ color: 'var(--text-bright)' }}>{formConfig.risk_per_trade_percent}%</strong>
+            资金占用: <strong style={{ color: 'var(--text-bright)' }}>
+              {formConfig.margin_mode === 'account_percent' 
+                ? `账户 ${formConfig.margin_percent || 5}% 保证金` 
+                : formConfig.margin_mode === 'fixed_amount' 
+                ? `固定 $${formConfig.fixed_margin_amount || 20} USDT` 
+                : `智能控仓 (风控 ${formConfig.risk_per_trade_percent}%)`}
+            </strong>
           </div>
         </div>
 
@@ -1001,7 +1012,102 @@ export default function SniperDashboard({ apiBase }) {
                   onChange={e => setModalConfig({ ...modalConfig, risk_per_trade_percent: e.target.value === '' ? '' : parseFloat(e.target.value) })}
                   className="form-control"
                 />
-                <span className="form-help">系统自动根据止损空间倒推建仓仓位，保证单笔亏损不超过此预算。</span>
+                <span className="form-help">智能控仓模式下，系统自动根据止损空间倒推建仓仓位，保证单笔亏损不超过此预算。</span>
+              </div>
+
+              <div className="form-group">
+                <label className="form-label">每单资金占用模式</label>
+                <div style={{ display: 'flex', gap: '0.8rem', marginTop: '0.2rem', flexWrap: 'wrap' }}>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', cursor: 'pointer' }}>
+                    <input
+                      type="radio"
+                      name="margin_mode"
+                      value="smart"
+                      checked={(modalConfig.margin_mode || 'smart') === 'smart'}
+                      onChange={() => setModalConfig({ ...modalConfig, margin_mode: 'smart' })}
+                    />
+                    <span>🧠 智能控仓</span>
+                  </label>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', cursor: 'pointer' }}>
+                    <input
+                      type="radio"
+                      name="margin_mode"
+                      value="account_percent"
+                      checked={modalConfig.margin_mode === 'account_percent'}
+                      onChange={() => setModalConfig({ ...modalConfig, margin_mode: 'account_percent' })}
+                    />
+                    <span>📊 账户资金占比 (%)</span>
+                  </label>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', cursor: 'pointer' }}>
+                    <input
+                      type="radio"
+                      name="margin_mode"
+                      value="fixed_amount"
+                      checked={modalConfig.margin_mode === 'fixed_amount'}
+                      onChange={() => setModalConfig({ ...modalConfig, margin_mode: 'fixed_amount' })}
+                    />
+                    <span>💵 固定保证金金额 (USDT)</span>
+                  </label>
+                </div>
+              </div>
+
+              {modalConfig.margin_mode === 'account_percent' && (
+                <div className="form-group">
+                  <label className="form-label">每单占用账户保证金比例 (%)</label>
+                  <input
+                    type="number"
+                    step="0.5"
+                    min="0.1"
+                    max="100"
+                    value={modalConfig.margin_percent ?? 5}
+                    onChange={e => setModalConfig({ ...modalConfig, margin_percent: e.target.value === '' ? '' : parseFloat(e.target.value) })}
+                    className="form-control"
+                  />
+                  <span className="form-help">按账户当前可用余额的固定百分比扣取每单开仓保证金。</span>
+                </div>
+              )}
+
+              {modalConfig.margin_mode === 'fixed_amount' && (
+                <div className="form-group">
+                  <label className="form-label">每单固定开仓保证金金额 (USDT)</label>
+                  <input
+                    type="number"
+                    step="1"
+                    min="1"
+                    value={modalConfig.fixed_margin_amount ?? 20}
+                    onChange={e => setModalConfig({ ...modalConfig, fixed_margin_amount: e.target.value === '' ? '' : parseFloat(e.target.value) })}
+                    className="form-control"
+                  />
+                  <span className="form-help">每笔订单固定投入此处设定的 USDT 数额作为开仓保证金。</span>
+                </div>
+              )}
+
+              <div className="form-group">
+                <label className="form-label">🎯 大额浮盈允许最大回退 (%)</label>
+                <input
+                  type="number"
+                  step="1"
+                  min="5"
+                  max="50"
+                  value={modalConfig.max_profit_drawdown_percent ?? 30}
+                  onChange={e => setModalConfig({ ...modalConfig, max_profit_drawdown_percent: e.target.value === '' ? '' : parseFloat(e.target.value) })}
+                  className="form-control"
+                />
+                <span className="form-help">当持仓浮盈达到 100% 以上时，最多允许从最高点回吐此比例的利润（默认 30%），其余 70%+ 的浮盈将被系统强行锁利保护。</span>
+              </div>
+
+              <div className="form-group">
+                <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
+                  <input
+                    type="checkbox"
+                    checked={modalConfig.enable_exchange_sl ?? true}
+                    onChange={e => setModalConfig({ ...modalConfig, enable_exchange_sl: e.target.checked })}
+                  />
+                  <span className="form-label" style={{ marginBottom: 0 }}>🛡️ 实盘自动同步挂止损单至交易所</span>
+                </label>
+                <span className="form-help" style={{ display: 'block', marginTop: '0.2rem' }}>
+                  开启后，建仓及追随止损会同步在交易所下挂 STOP_MARKET 条件单。关闭后，仅依赖本机软件 10 秒轮询双保险平仓。
+                </span>
               </div>
 
               <div className="form-group">

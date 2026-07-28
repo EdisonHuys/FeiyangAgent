@@ -29,6 +29,7 @@ export default function App() {
 
   // Logs terminal
   const [monitorLogs, setMonitorLogs] = useState([]);
+  const [hasNewUnreadLogs, setHasNewUnreadLogs] = useState(false);
   const logConsoleRef = React.useRef(null);
 
   // 0. Splash Screen loading animation
@@ -196,10 +197,34 @@ export default function App() {
     return () => clearInterval(interval);
   }, []);
 
-  // 5. Scroll log console to bottom automatically
-  useEffect(() => {
+  const scrollToLogBottom = () => {
     if (logConsoleRef.current) {
       logConsoleRef.current.scrollTop = logConsoleRef.current.scrollHeight;
+      setHasNewUnreadLogs(false);
+    }
+  };
+
+  const handleLogScroll = () => {
+    if (logConsoleRef.current) {
+      const { scrollTop, scrollHeight, clientHeight } = logConsoleRef.current;
+      const distanceFromBottom = scrollHeight - scrollTop - clientHeight;
+      if (distanceFromBottom <= 40) {
+        setHasNewUnreadLogs(false);
+      }
+    }
+  };
+
+  // 5. Scroll log console to bottom automatically if user is near bottom
+  useEffect(() => {
+    if (logConsoleRef.current) {
+      const { scrollTop, scrollHeight, clientHeight } = logConsoleRef.current;
+      const distanceFromBottom = scrollHeight - scrollTop - clientHeight;
+      if (distanceFromBottom <= 40) {
+        logConsoleRef.current.scrollTop = logConsoleRef.current.scrollHeight;
+        setHasNewUnreadLogs(false);
+      } else {
+        setHasNewUnreadLogs(true);
+      }
     }
   }, [monitorLogs]);
 
@@ -595,7 +620,8 @@ export default function App() {
                     height: '160px',
                     display: 'flex',
                     flexDirection: 'column',
-                    minHeight: '160px'
+                    minHeight: '160px',
+                    position: 'relative'
                   }}
                 >
                   <div 
@@ -644,6 +670,7 @@ export default function App() {
                   </div>
                   <div 
                     ref={logConsoleRef}
+                    onScroll={handleLogScroll}
                     style={{
                       flex: 1,
                       background: 'rgba(0,0,0,0.03)',
@@ -677,6 +704,33 @@ export default function App() {
                       </div>
                     )}
                   </div>
+                  {hasNewUnreadLogs && (
+                    <button
+                      type="button"
+                      onClick={scrollToLogBottom}
+                      style={{
+                        position: 'absolute',
+                        bottom: '12px',
+                        right: '16px',
+                        background: '#007aff',
+                        color: '#ffffff',
+                        border: 'none',
+                        borderRadius: '16px',
+                        padding: '4px 12px',
+                        fontSize: '0.72rem',
+                        fontWeight: 'bold',
+                        cursor: 'pointer',
+                        boxShadow: '0 2px 8px rgba(0,0,0,0.25)',
+                        zIndex: 10,
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '4px',
+                        transition: 'all 0.2s ease'
+                      }}
+                    >
+                      👇 收到新日志 (点击置底)
+                    </button>
+                  )}
                 </div>
               </div>
             </section>
