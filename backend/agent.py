@@ -604,6 +604,8 @@ class FeiyangAgent:
             avg_conf = (signal_1.get("confidence_score", 0) + signal_2.get("confidence_score", 0)) // 2
             final_signal["confidence_score"] = avg_conf
             final_signal["consensus"] = True
+            # Sync the report's 合计 row to match the consensus-adjusted score
+            final_report = re.sub(r"(合计[^\d]*)\d+(\s*/\s*12)", rf"\g<1>{avg_conf}\2", final_report)
             logger.info(
                 f"[Consensus] AGREEMENT: both calls = {sig_type_1} "
                 f"(conf {signal_1.get('confidence_score')}/{signal_2.get('confidence_score')} → avg {avg_conf})"
@@ -625,6 +627,8 @@ class FeiyangAgent:
                     final_report = report_2
                 final_signal["confidence_score"] = max_conf - 1  # Penalize 1 point for lack of consensus
                 final_signal["consensus"] = False
+                # Sync the report's 合计 row to match the penalized score
+                final_report = re.sub(r"(合计[^\d]*)\d+(\s*/\s*12)", rf"\g<1>{max_conf - 1}\2", final_report)
                 logger.info(
                     f"[Consensus] DISAGREEMENT but high-confidence override: "
                     f"call1={sig_type_1}(conf={conf_1}) vs call2={sig_type_2}(conf={conf_2}) "

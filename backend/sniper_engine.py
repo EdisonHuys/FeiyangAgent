@@ -294,18 +294,36 @@ class SniperEngine:
             return None
         ccxt_symbol = f"{symbol}:USDT" if ":" not in symbol else symbol
         close_side = "sell" if sig_type == "long" else "buy"
+        pos_side = "LONG" if sig_type == "long" else "SHORT"
         try:
-            try:
-                amount = float(exchange.amount_to_precision(ccxt_symbol, amount))
-            except Exception:
-                pass
-            res = exchange.create_order(
-                symbol=ccxt_symbol,
-                type="market",
-                side=close_side,
-                amount=amount,
-                params={"triggerPrice": stop_loss, "reduceOnly": True}
-            )
+            if ex_id == "binance":
+                # Use closePosition=True: closes the FULL position on trigger,
+                # no need to specify amount → avoids minimum lot size rejection
+                res = exchange.create_order(
+                    symbol=ccxt_symbol,
+                    type="STOP_MARKET",
+                    side=close_side,
+                    amount=None,
+                    params={"positionSide": pos_side, "stopPrice": stop_loss, "closePosition": True}
+                )
+            else:
+                # Other exchanges: validate amount against market minimum
+                try:
+                    amount = float(exchange.amount_to_precision(ccxt_symbol, amount))
+                except Exception:
+                    pass
+                market = exchange.market(ccxt_symbol)
+                min_amount = (market.get("limits") or {}).get("amount", {}).get("min", 0)
+                if amount < (min_amount or 0):
+                    logger.warning(f"[LiveSniper] ⚠️ {symbol} 保护止损量 {amount} < 最小量 {min_amount}，跳过交易所侧挂单")
+                    return None
+                res = exchange.create_order(
+                    symbol=ccxt_symbol,
+                    type="market",
+                    side=close_side,
+                    amount=amount,
+                    params={"triggerPrice": stop_loss, "reduceOnly": True}
+                )
             order_id = str(res.get("id"))
             logger.info(f"[LiveSniper] 🛡️ 交易所侧止损保护单已挂设: {ccxt_symbol} trigger=${stop_loss} (#{order_id})")
             return order_id
@@ -526,28 +544,39 @@ class SniperEngine:
             close_side = "sell" if sig_type == "long" else "buy"
             pos_side = "LONG" if sig_type == "long" else "SHORT"
 
-            params = {}
             if ex_id == "binance":
-                params = {"positionSide": pos_side, "stopPrice": sl_price, "reduceOnly": True}
-                order_type = "STOP_MARKET"
-            elif ex_id == "okx":
-                params = {"positionSide": pos_side.lower(), "triggerPrice": str(sl_price), "reduceOnly": True}
-                order_type = "market"
-            elif ex_id == "bybit":
-                params = {"positionSide": pos_side, "triggerPrice": str(sl_price), "reduceOnly": True}
-                order_type = "market"
+                # closePosition=True closes the full (remaining) position on trigger
+                res = exchange.create_order(
+                    symbol=ccxt_symbol,
+                    type="STOP_MARKET",
+                    side=close_side,
+                    amount=None,
+                    params={"positionSide": pos_side, "stopPrice": sl_price, "closePosition": True}
+                )
             else:
-                params = {"stopPrice": sl_price, "reduceOnly": True}
-                order_type = "market"
+                try:
+                    amount = float(exchange.amount_to_precision(ccxt_symbol, amount))
+                except Exception:
+                    pass
+                market = exchange.market(ccxt_symbol)
+                min_amount = (market.get("limits") or {}).get("amount", {}).get("min", 0)
+                if amount < (min_amount or 0):
+                    logger.warning(f"[SniperEngine] ⚠️ {symbol} TP1保护止损量 {amount} < 最小量 {min_amount}，跳过")
+                    return False
+                params = {"triggerPrice": str(sl_price), "reduceOnly": True}
+                if ex_id == "okx":
+                    params["positionSide"] = pos_side.lower()
+                elif ex_id == "bybit":
+                    params["positionSide"] = pos_side
+                res = exchange.create_order(
+                    symbol=ccxt_symbol,
+                    type="market",
+                    side=close_side,
+                    amount=amount,
+                    params=params
+                )
 
-            res = exchange.create_order(
-                symbol=ccxt_symbol,
-                type=order_type,
-                side=close_side,
-                amount=amount,
-                params=params
-            )
-            logger.info(f"[SniperEngine] ✅ {symbol} TP1后重挂保护性止损成功: {close_side} {amount} @ stop={sl_price} (order={res.get('id')})")
+            logger.info(f"[SniperEngine] ✅ {symbol} TP1后重挂保护性止损成功: {close_side} @ stop={sl_price} (order={res.get('id')})")
             return True
         except Exception as e:
             logger.warning(f"[SniperEngine] ⚠️ {symbol} TP1后重挂保护性止损失败: {e} — 本地引擎仍会监控止损线")
@@ -1377,6 +1406,23 @@ class SniperEngine:
             except Exception:
                 pass
 
+            # Safety: if precision truncation killed the amount, fetch real position size
+            market = exchange.market(ccxt_symbol)
+            min_amount = (market.get("limits") or {}).get("amount", {}).get("min", 0) or 0
+            if amount < min_amount:
+                try:
+                    positions = exchange.fetch_positions([ccxt_symbol])
+                    for p in positions:
+                        if p.get("symbol") == ccxt_symbol and float(p.get("contracts", 0) or 0) > 0:
+                            amount = float(p["contracts"])
+                            logger.info(f"[LiveSniper] 使用交易所实际仓位量替代: {amount}")
+                            break
+                except Exception:
+                    pass
+                if amount < min_amount:
+                    logger.error(f"[LiveSniper] ❌ {symbol} 平仓量 {amount} < 最小量 {min_amount}，无法下单")
+                    return None
+
             logger.info(f"[LiveSniper] 🛡️ [双保险防守触发] 向 {ex_id.upper()} 下发紧急市价平仓单: {ccxt_symbol} {close_side.upper()} amount={amount} ({reason})")
             
             # Attempt 1: Try with Hedge Mode positionSide parameter
@@ -1696,24 +1742,23 @@ class SniperEngine:
 
                 order_params = {}
                 if ex_id == "binance":
+                    # Only attach SL for crash protection; do NOT attach TP here.
+                    # Attached TP would close 100% at TP1 on exchange side, overriding
+                    # the monitoring loop's 50% partial close + TP2 strategy.
                     order_params = {
                         "positionSide": pos_side,
-                        "stopLoss": {"triggerPrice": sl},
-                        "takeProfit": {"triggerPrice": tp_list[0]}
+                        "stopLoss": {"triggerPrice": sl}
                     }
                 elif ex_id == "okx":
                     order_params = {
                         "positionSide": pos_side.lower(),
                         "slTriggerPrice": str(sl),
-                        "slOrderType": "market",
-                        "tpTriggerPrice": str(tp_list[0]),
-                        "tpOrderType": "market"
+                        "slOrderType": "market"
                     }
                 elif ex_id == "bybit":
                     order_params = {
                         "positionSide": pos_side,
-                        "stopLoss": str(sl),
-                        "takeProfit": str(tp_list[0])
+                        "stopLoss": str(sl)
                     }
 
                 order_type = "market" if instant_fill else "limit"
