@@ -1,10 +1,15 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 // Import createChart along with the specific series types required by version 5
 import { createChart, CandlestickSeries, HistogramSeries, LineSeries } from 'lightweight-charts';
 
-export default function KLineChart({ data }) {
+const API_BASE = window.location.origin.includes('5173') ? 'http://127.0.0.1:8000' : window.location.origin;
+
+export default function KLineChart({ data, symbol }) {
   const chartContainerRef = useRef(null);
   const chartRef = useRef(null);
+  const candlestickSeriesRef = useRef(null);
+  const priceLinesRef = useRef([]);
+  const [trades, setTrades] = useState([]);
 
   useEffect(() => {
     if (!chartContainerRef.current || !data || data.length === 0) return;
@@ -135,6 +140,7 @@ export default function KLineChart({ data }) {
       wickDownColor: '#f43f5e',
       priceFormat: priceFormatOptions,
     });
+    candlestickSeriesRef.current = candlestickSeries;
 
     // 4. Add Volume Series (Using v5 addSeries API)
     const volumeSeries = chart.addSeries(HistogramSeries, {
@@ -226,8 +232,104 @@ export default function KLineChart({ data }) {
     return () => {
       resizeObserver.disconnect();
       chart.remove();
+      candlestickSeriesRef.current = null;
     };
   }, [data]);
+
+  // 1. Fetch trades periodically
+  useEffect(() => {
+    const fetchTrades = async () => {
+      try {
+        const res = await fetch(`${API_BASE}/api/sniper/trades`);
+        const json = await res.json();
+        if (json.trades) {
+          setTrades(json.trades);
+        }
+      } catch (err) {
+        console.error("Failed to fetch trades for chart:", err);
+      }
+    };
+    fetchTrades();
+    const interval = setInterval(fetchTrades, 5000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // 2. Draw active and pending trade levels dynamically on the candlestick series
+  useEffect(() => {
+    const candlestickSeries = candlestickSeriesRef.current;
+    if (!candlestickSeries) return;
+
+    // Clear existing price lines
+    priceLinesRef.current.forEach(line => {
+      try {
+        candlestickSeries.removePriceLine(line);
+      } catch (e) {
+        console.error("Failed to remove price line:", e);
+      }
+    });
+    priceLinesRef.current = [];
+
+    if (!symbol) return;
+
+    // Filter active/pending trades matching the current symbol
+    const activeTrades = trades.filter(t => 
+      t.symbol === symbol && 
+      ['pending', 'filled', 'tp1_hit'].includes(t.status)
+    );
+
+    activeTrades.forEach(t => {
+      const isPending = t.status === 'pending';
+      const entryPrice = isPending ? t.planned_entry : (t.actual_entry || t.planned_entry);
+      const direction = t.signal_type ? t.signal_type.toUpperCase() : 'UNKNOWN';
+
+      if (entryPrice > 0) {
+        try {
+          const entryLine = candlestickSeries.createPriceLine({
+            price: entryPrice,
+            color: '#3b82f6', // Bright Blue
+            lineWidth: 2,
+            lineStyle: 0, // Solid
+            axisLabelVisible: true,
+            title: isPending ? `挂单点 (${direction})` : `开仓点 (${direction})`,
+          });
+          priceLinesRef.current.push(entryLine);
+        } catch (e) { console.error("Failed to draw entry price line:", e); }
+      }
+
+      if (t.stop_loss > 0) {
+        try {
+          const slLine = candlestickSeries.createPriceLine({
+            price: t.stop_loss,
+            color: '#ef4444', // Red
+            lineWidth: 1.5,
+            lineStyle: 1, // Dashed
+            axisLabelVisible: true,
+            title: '防守止损 (SL)',
+          });
+          priceLinesRef.current.push(slLine);
+        } catch (e) { console.error("Failed to draw SL price line:", e); }
+      }
+
+      if (t.take_profit_targets && t.take_profit_targets.length > 0) {
+        t.take_profit_targets.forEach((tp, idx) => {
+          if (tp > 0) {
+            try {
+              const tpLine = candlestickSeries.createPriceLine({
+                price: tp,
+                color: '#10b981', // Green
+                lineWidth: 1.5,
+                lineStyle: 1, // Dashed
+                axisLabelVisible: true,
+                title: `止盈目标 TP${idx + 1}`,
+              });
+              priceLinesRef.current.push(tpLine);
+            } catch (e) { console.error("Failed to draw TP price line:", e); }
+          }
+        });
+      }
+    });
+
+  }, [trades, symbol, data]);
 
   const hasData = data && data.length > 0;
 

@@ -606,7 +606,7 @@ export default function App() {
                       <p>{marketError}</p>
                     </div>
                   ) : (
-                    <KLineChart key={`${activeSymbol}_${selectedTimeframe}`} data={chartData} />
+                    <KLineChart key={`${activeSymbol}_${selectedTimeframe}`} data={chartData} symbol={activeSymbol} />
                   )}
                 </div>
 
