@@ -209,7 +209,7 @@ def process_signal_evaluation(symbol: str, payload: dict, json_signal: dict, mar
     if sig_type == "wait":
         last_signals[symbol] = {"signal_type": "wait"}
         save_signals_state(last_signals)
-        log_monitor_event(f"✅ [{source_tag}] {symbol} 诊断完成。交易决策：WAIT (观望等待)，当前价：${current_price}，置信度：{conf}/12。已静默不发送推送。")
+        log_monitor_event(f"✅ [{source_tag}] {symbol} 诊断完成。交易决策：WAIT (观望等待)，当前价：${current_price}，置信度：{conf}/10。已静默不发送推送。")
         return
 
     if sig_type in ["long", "short"]:
@@ -779,7 +779,7 @@ def run_analysis(req: AnalysisRequest):
 
             sig_label = json_signal.get("signal_type", "wait").upper()
             conf = json_signal.get("confidence_score", 0)
-            log_monitor_event(f"✅ [手动诊断成功] {symbol} 诊断完成。交易决策：{sig_label}，置信度：{conf}/12。")
+            log_monitor_event(f"✅ [手动诊断成功] {symbol} 诊断完成。交易决策：{sig_label}，置信度：{conf}/10。")
 
             with analysis_tasks_lock:
                 analysis_tasks[task_id]["status"] = "done"
