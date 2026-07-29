@@ -927,7 +927,7 @@ export default function SniperDashboard({ apiBase }) {
                         </td>
 
                         <td>
-                          {t.status === 'pending' && <span className="badge-status pending">⏳ 等待挂单回踩</span>}
+                          {t.status === 'pending' && <span className="badge-status pending">⏳ {isLong ? '等待挂单回踩' : '等待挂单冲高'}</span>}
                           {t.status === 'closed_tp' && <span className="badge-status closed_tp">🎉 止盈平仓</span>}
                           {t.status === 'closed_sl' && <span className="badge-status closed_sl">🛡️ 止损平仓</span>}
                           {t.status === 'cancelled' && <span className="badge-status" style={{ background: 'rgba(0,0,0,0.05)', color: '#86868b' }}>⚪ 已撤单</span>}
