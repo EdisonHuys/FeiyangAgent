@@ -730,8 +730,7 @@ class SniperEngine:
             
             cfg = self.state.get("config", {})
             for k, v in new_cfg.items():
-                if k in cfg:
-                    cfg[k] = v
+                cfg[k] = v
             self.state["config"] = cfg
             self._save_state()
             return self.get_config()
@@ -1552,7 +1551,12 @@ class SniperEngine:
 
         # 🚨 Daily circuit breaker: refuse all new trades while halted
         if self._check_circuit_breaker():
-            logger.info(f"[SniperEngine] Circuit breaker active — new {symbol} signal ignored.")
+            msg = f"⚠️ [狙击系统] 今日日内亏损熔断已触发，已自动拦截新信号 {symbol} ({sig_type_check.upper()}) 挂单。"
+            logger.info(msg)
+            try:
+                from app import log_monitor_event
+                log_monitor_event(msg)
+            except Exception: pass
             return None
 
         # ⏰ Time-of-day liquidity filter: avoid low-liquidity hours
@@ -1561,14 +1565,24 @@ class SniperEngine:
         utc_hour = _dt.now(_tz.utc).hour
         low_liquidity_hours = cfg.get("low_liquidity_hours_utc", [20, 21, 22, 23])
         if utc_hour in low_liquidity_hours:
-            logger.info(f"[SniperEngine] Low-liquidity hour (UTC {utc_hour}:00) — {symbol} signal deferred.")
+            msg = f"⏳ [狙击系统] 当前处于低流动性时段 (UTC {utc_hour}:00)，已自动拦截新信号 {symbol} ({sig_type_check.upper()}) 挂单。"
+            logger.info(msg)
+            try:
+                from app import log_monitor_event
+                log_monitor_event(msg)
+            except Exception: pass
             return None
 
         # 📰 Market context bias check: respect sentiment-driven stand_aside
         market_ctx = json_signal.get("market_context") or {}
         trading_bias = market_ctx.get("trading_bias", "normal")
         if trading_bias == "stand_aside":
-            logger.info(f"[SniperEngine] Market context bias = stand_aside — {symbol} signal blocked.")
+            msg = f"📰 [狙击系统] 大盘环境风控拦截：当前 trading_bias 建议观望 (stand_aside)，已自动拦截新信号 {symbol} 挂单。"
+            logger.info(msg)
+            try:
+                from app import log_monitor_event
+                log_monitor_event(msg)
+            except Exception: pass
             return None
 
         # 🔗 Correlation check: avoid same-direction positions on highly correlated pairs
@@ -1583,17 +1597,27 @@ class SniperEngine:
             if symbol in group:
                 for t in active_filled:
                     if t["symbol"] in group and t["symbol"] != symbol and t["signal_type"] == sig_type_check:
-                        logger.info(
-                            f"[SniperEngine] Correlation block: {symbol} {sig_type_check} blocked — "
-                            f"correlated {t['symbol']} already has same-direction position."
-                        )
+                        msg = f"🛡️ [狙击系统] 强相关性风控拦截：由于已持有同向的 {t['symbol']} ({sig_type_check.upper()}) 仓位，已自动拦截 {symbol} ({sig_type_check.upper()}) 挂单。"
+                        logger.info(msg)
+                        try:
+                            from app import log_monitor_event
+                            log_monitor_event(msg)
+                        except Exception: pass
                         return None
 
         sig_type = str(json_signal.get("signal_type", "wait")).lower()
         conf = json_signal.get("confidence_score", 0)
         min_conf = cfg.get("min_confidence", 7)
 
-        if sig_type not in ["long", "short"] or conf < min_conf:
+        if sig_type not in ["long", "short"]:
+            return None
+        if conf < min_conf:
+            msg = f"⚙️ [狙击系统] 过滤新信号：{symbol} {sig_type.upper()} 置信度评分 {conf} 低于最低要求 {min_conf}，已过滤不挂单。"
+            logger.info(msg)
+            try:
+                from app import log_monitor_event
+                log_monitor_event(msg)
+            except Exception: pass
             return None
 
         trades = self.state.get("trades", [])
@@ -1709,21 +1733,34 @@ class SniperEngine:
             geometry_ok = (sl > entry_max) and (tp_list[0] < entry_min)
             reject_reason = f"空头要求 SL({sl}) > 入场区上限({entry_max}) 且 TP1({tp_list[0]}) < 入场区下限({entry_min})"
         if not geometry_ok:
-            logger.warning(f"[SniperEngine] Rejected {sig_type.upper()} signal for {symbol}: invalid geometry. {reject_reason}")
+            msg = f"⚠️ [狙击系统] 拒单：{symbol} {sig_type.upper()} 信号点位不符合逻辑几何安全要求 ({reject_reason})。"
+            logger.warning(msg)
+            try:
+                from app import log_monitor_event
+                log_monitor_event(msg)
+            except Exception: pass
             return None
 
         # Check current price vs entry zone -> determine whether to place pending limit order or fill INSTANTLY
         curr_px = float(current_price) if (current_price and float(current_price) > 0) else 0.0
-        
+
         # Check if current price is already invalidated (past stop loss)
         if curr_px > 0:
             if (sig_type == "long" and curr_px <= sl) or (sig_type == "short" and curr_px >= sl):
-                logger.warning(f"[SniperEngine] Rejected {sig_type.upper()} signal for {symbol}: current price ${curr_px} already breached SL ${sl}.")
+                msg = f"⚠️ [狙击系统] 拒单：{symbol} ({sig_type.upper()}) 当前市价 ${curr_px} 已经穿透止损线 ${sl}，开仓点失效。"
+                logger.warning(msg)
+                try:
+                    from app import log_monitor_event
+                    log_monitor_event(msg)
+                except Exception: pass
                 return None
 
-        # Check if current price is ALREADY inside entry_zone or better -> Instant Market Fill!
+        # Check if LLM explicitly requested "market" OR current price is inside entry_zone/better -> Instant Market Fill!
+        entry_type_signal = str(json_signal.get("entry_type", "limit")).lower()
         instant_fill = False
-        if curr_px > 0:
+        if entry_type_signal == "market":
+            instant_fill = True
+        elif curr_px > 0:
             if sig_type == "long" and curr_px <= entry_max and curr_px > sl:
                 instant_fill = True
             elif sig_type == "short" and curr_px >= entry_min and curr_px < sl:
@@ -1978,11 +2015,11 @@ class SniperEngine:
                         else:
                             t["actual_entry"] = ex_entry
                     # PnL from exchange (authoritative)
-                    t["exchange_pnl_percent"] = rp.get("unrealized_pnl_percent", 0.0)
-                    t["unrealized_pnl_percent"] = rp.get("unrealized_pnl_percent", 0.0)
+                    pnl_pct = rp.get("unrealized_pnl_percent", 0.0)
+                    t["exchange_pnl_percent"] = pnl_pct
+                    t["unrealized_pnl_percent"] = pnl_pct
                     ex_pnl = float(rp.get("unrealized_pnl", 0.0) or 0.0)
                     t["unrealized_pnl_usd"] = ex_pnl
-                    t["pnl_usd"] = ex_pnl
                     ex_mark = float(rp.get("mark_price", 0.0) or 0.0)
                     if ex_mark > 0:
                         t["current_price"] = ex_mark
@@ -2207,12 +2244,12 @@ class SniperEngine:
                     # Close at current market price — position is stale
                     close_px = current_price
                     if sig_type == "long":
-                        stale_pnl_pct = (close_px - actual_entry) / actual_entry * lev
+                        stale_pnl = amount * (close_px - actual_entry)
                     else:
-                        stale_pnl_pct = (actual_entry - close_px) / actual_entry * lev
+                        stale_pnl = amount * (actual_entry - close_px)
                     taker_fee, _, slippage = self._fee_rates()
                     exit_fee = self._record_fee(t, pos_val, taker_fee)
-                    stale_net = round(margin * stale_pnl_pct - exit_fee, 2)
+                    stale_net = round(stale_pnl - exit_fee, 2)
                     close_reason = f"⏰ 持仓超过 {int(max_hold_hours)}h 未达 TP1，时间止损市价平仓 (PnL: ${stale_net})"
                     if t.get("is_live"):
                         # Must confirm exchange close succeeded before marking closed
@@ -2251,9 +2288,9 @@ class SniperEngine:
                     taker_fee, _, slippage = self._fee_rates()
                     exit_price = current_price if pnl_breached else sl
                     exec_price = exit_price * (1 - slippage)
-                    loss_pct = (exec_price - actual_entry) / actual_entry * lev
+                    raw_pnl = amount * rem_ratio * (exec_price - actual_entry)
                     exit_fee = self._record_fee(t, pos_val * rem_ratio, taker_fee)
-                    leg_net = round(margin * rem_ratio * loss_pct - exit_fee, 2)
+                    leg_net = round(raw_pnl - exit_fee, 2)
                     t["pnl_usd"] = round(t.get("pnl_usd", 0.0) + leg_net, 2)
                     t["pnl_percent"] = round((t["pnl_usd"] / margin) * 100.0, 2)
                     if not t.get("is_live"):
@@ -2276,7 +2313,7 @@ class SniperEngine:
                     if t.get("is_live"):
                         self._place_protective_sl_on_exchange(symbol, "long", actual_entry, round(amount * 0.5, 4))
                     taker_fee, _, _ = self._fee_rates()
-                    part_pnl = (tps[0] - actual_entry) / actual_entry * lev * 0.5 * margin
+                    part_pnl = amount * 0.5 * (tps[0] - actual_entry)
                     exit_fee = self._record_fee(t, pos_val * 0.5, taker_fee)
                     part_net = round(part_pnl - exit_fee, 2)
                     t["pnl_usd"] = round(t.get("pnl_usd", 0.0) + part_net, 2)
@@ -2299,7 +2336,7 @@ class SniperEngine:
                     t["status"] = "closed_tp"
                     t["closed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     taker_fee, _, _ = self._fee_rates()
-                    rem_pnl = (max_tp - actual_entry) / actual_entry * lev * rem_factor * margin
+                    rem_pnl = amount * rem_factor * (max_tp - actual_entry)
                     exit_fee = self._record_fee(t, pos_val * rem_factor, taker_fee)
                     rem_net = round(rem_pnl - exit_fee, 2)
                     t["pnl_usd"] = round(t.get("pnl_usd", 0.0) + rem_net, 2)
@@ -2327,9 +2364,9 @@ class SniperEngine:
                     taker_fee, _, slippage = self._fee_rates()
                     exit_price = current_price if pnl_breached else sl
                     exec_price = exit_price * (1 + slippage)
-                    loss_pct = (actual_entry - exec_price) / actual_entry * lev
+                    raw_pnl = amount * rem_ratio * (actual_entry - exec_price)
                     exit_fee = self._record_fee(t, pos_val * rem_ratio, taker_fee)
-                    leg_net = round(margin * rem_ratio * loss_pct - exit_fee, 2)
+                    leg_net = round(raw_pnl - exit_fee, 2)
                     t["pnl_usd"] = round(t.get("pnl_usd", 0.0) + leg_net, 2)
                     t["pnl_percent"] = round((t["pnl_usd"] / margin) * 100.0, 2)
                     if not t.get("is_live"):
@@ -2352,7 +2389,7 @@ class SniperEngine:
                     if t.get("is_live"):
                         self._place_protective_sl_on_exchange(symbol, "short", actual_entry, round(amount * 0.5, 4))
                     taker_fee, _, _ = self._fee_rates()
-                    part_pnl = (actual_entry - tps[0]) / actual_entry * lev * 0.5 * margin
+                    part_pnl = amount * 0.5 * (actual_entry - tps[0])
                     exit_fee = self._record_fee(t, pos_val * 0.5, taker_fee)
                     part_net = round(part_pnl - exit_fee, 2)
                     t["pnl_usd"] = round(t.get("pnl_usd", 0.0) + part_net, 2)
@@ -2375,7 +2412,7 @@ class SniperEngine:
                     t["status"] = "closed_tp"
                     t["closed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     taker_fee, _, _ = self._fee_rates()
-                    rem_pnl = (actual_entry - min_tp) / actual_entry * lev * rem_factor * margin
+                    rem_pnl = amount * rem_factor * (actual_entry - min_tp)
                     exit_fee = self._record_fee(t, pos_val * rem_factor, taker_fee)
                     rem_net = round(rem_pnl - exit_fee, 2)
                     t["pnl_usd"] = round(t.get("pnl_usd", 0.0) + rem_net, 2)

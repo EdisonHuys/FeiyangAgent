@@ -31,7 +31,8 @@ export default function SniperDashboard({ apiBase }) {
     live_passphrase: '',
     live_trading_mode: 'swap',
     daily_max_loss_percent: 6,
-    pending_ttl_hours: 24
+    pending_ttl_hours: 24,
+    max_trade_loss_percent: 50.0
   });
 
   // Modal Draft Config (completely isolated from background polling)
@@ -183,6 +184,7 @@ export default function SniperDashboard({ apiBase }) {
       if ('min_confidence' in sanitized) sanitized.min_confidence = parseInt(sanitized.min_confidence) || 7;
       if ('daily_max_loss_percent' in sanitized) { const v = parseFloat(sanitized.daily_max_loss_percent); sanitized.daily_max_loss_percent = isNaN(v) ? 6.0 : v; }
       if ('pending_ttl_hours' in sanitized) { const v = parseFloat(sanitized.pending_ttl_hours); sanitized.pending_ttl_hours = isNaN(v) ? 24.0 : v; }
+      if ('max_trade_loss_percent' in sanitized) { const v = parseFloat(sanitized.max_trade_loss_percent); sanitized.max_trade_loss_percent = isNaN(v) ? 50.0 : v; }
 
       const res = await fetch(`${apiBase}/api/sniper/config`, {
         method: 'POST',
@@ -1203,6 +1205,19 @@ export default function SniperDashboard({ apiBase }) {
                   onChange={e => setModalConfig({ ...modalConfig, min_confidence: e.target.value === '' ? '' : parseInt(e.target.value) })}
                   className="form-control"
                 />
+              </div>
+
+              <div className="form-group">
+                <label className="form-label">🛡️ 单笔持仓最大亏损限制 (%)</label>
+                <input
+                  type="number"
+                  min="10"
+                  max="100"
+                  value={modalConfig.max_trade_loss_percent ?? 50}
+                  onChange={e => setModalConfig({ ...modalConfig, max_trade_loss_percent: e.target.value === '' ? '' : parseFloat(e.target.value) })}
+                  className="form-control"
+                />
+                <span className="form-help">单笔持仓浮亏率（含杠杆倍数）达到此阈值时强制市价平仓。推荐 50% 保护本金。</span>
               </div>
 
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem' }}>

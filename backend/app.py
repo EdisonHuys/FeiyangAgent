@@ -906,6 +906,7 @@ class SniperConfigRequest(BaseModel):
     circuit_breaker_enabled: Optional[bool] = None
     daily_max_loss_percent: Optional[float] = None
     pending_ttl_hours: Optional[float] = None
+    max_trade_loss_percent: Optional[float] = None
     taker_fee_rate: Optional[float] = None
     maker_fee_rate: Optional[float] = None
     slippage_rate: Optional[float] = None

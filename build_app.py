@@ -42,6 +42,25 @@ def build_frontend():
         sys.exit(1)
 
 
+import shutil
+
+def sync_prompt_to_dist():
+    """Sync root feiyang_prompt.txt to dist/ directory so packaged app uses updated prompt."""
+    root_prompt = "feiyang_prompt.txt"
+    if os.path.exists(root_prompt):
+        dist_dir = "dist"
+        os.makedirs(dist_dir, exist_ok=True)
+        dst_path = os.path.join(dist_dir, "feiyang_prompt.txt")
+        shutil.copy2(root_prompt, dst_path)
+        print(f"   [Sync] Successfully synchronized {root_prompt} -> {dst_path}")
+
+        win_onedir = os.path.join(dist_dir, "FeiyangAgent")
+        if os.path.isdir(win_onedir):
+            win_dst = os.path.join(win_onedir, "feiyang_prompt.txt")
+            shutil.copy2(root_prompt, win_dst)
+            print(f"   [Sync] Successfully synchronized {root_prompt} -> {win_dst}")
+
+
 def build_macos():
     """Build macOS .app bundle."""
     print("2. Packaging macOS application with PyInstaller...")
@@ -70,6 +89,7 @@ def build_macos():
 
     try:
         PyInstaller.__main__.run(pyinstaller_args)
+        sync_prompt_to_dist()
         print("\n=== macOS BUILD SUCCESSFUL ===")
         print("Your application is ready at: dist/FeiyangAgent.app")
         print("To run: open dist/FeiyangAgent.app")
