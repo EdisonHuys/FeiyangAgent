@@ -829,7 +829,7 @@ export default function App() {
                         <div style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', display: 'inline-flex', alignItems: 'center', gap: '0.2rem', lineHeight: 'normal' }}>
                           <span>置信度评分:</span>
                           <span style={{ color: '#b25000', fontWeight: 'bold', fontSize: '1.05rem', display: 'inline-flex', alignItems: 'center' }}>{prediction.signal.confidence_score}</span>
-                          <span>/ 12</span>
+                          <span>/ 10</span>
                         </div>
                       </div>
                       

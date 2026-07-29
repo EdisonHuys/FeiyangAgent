@@ -1196,7 +1196,7 @@ export default function SniperDashboard({ apiBase }) {
               </div>
 
               <div className="form-group">
-                <label className="form-label">触发狙击最低 AI 置信度 (1-12)</label>
+                <label className="form-label">触发狙击最低 AI 置信度 (1-10)</label>
                 <input
                   type="number"
                   min="5"
