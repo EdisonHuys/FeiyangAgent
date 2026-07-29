@@ -268,6 +268,7 @@ planned_entry = 加权平均 = 0.40×min + 0.35×mid + 0.25×max
 ### 5.8 实盘下单
 
 ```python
+0. 🛡️ 强制逐仓模式: set_margin_mode("ISOLATED", ccxt_symbol) (隔离单笔仓位风险，严防全仓贯穿爆仓)
 1. set_leverage (失败仅警告)
 2. 计算amount = pos_val / planned_entry
 3. 强制 ≥ 交易所最小量
@@ -354,24 +355,25 @@ planned_entry = 加权平均 = 0.40×min + 0.35×mid + 0.25×max
   3. PnL = (TP-entry)/entry × lev × rem_factor × margin - taker_fee
 ```
 
-### 6.4 动态阶梯追踪止损 (`_update_trailing_stop_loss`)
+### 6.4 动态阶梯防窒息追踪止损 (`_update_trailing_stop_loss`)
 
 ```
 参数:
-  激活阈值: 浮盈 ≥ 12%
-  最小峰值步进: 3% (防频繁更新)
+  保本防守阈值: 浮盈 ≥ 25% (精确推开仓保本价 actual_entry，0 风险防守)
+  追踪激活阈值: 浮盈 ≥ 40% (给前期行情 100% 自由回踩呼吸空间，防止微观噪音打出局)
+  最小峰值步进: 4% (防频繁 API 挂单更新)
+  物理价格安全缓冲区: 0.6% (无论杠杆多高，止损价距离当前标记价必须保持 ≥ 0.6% 空间)
   最大利润回退配置: max_profit_drawdown_percent (默认 30%)
 
-分段动态锁定比例 (Tiered LOCK_RATIO):
-  - Peak PnL < 30%: LOCK_RATIO = 50% (保护本金与微利)
-  - 30% ≤ Peak PnL < 100%: LOCK_RATIO = 60%
-  - Peak PnL ≥ 100% (爆发单): LOCK_RATIO = 100% - max_profit_drawdown_percent (默认 70%, 即顶住最大 30% 利润回吐)
+分段防守与动态锁定 (Anti-Suffocation Tiered Rules):
+  - Peak PnL < 25%: 完全保持原始技术止损，给行情 100% 孕育呼吸空间
+  - 25% ≤ Peak PnL < 40%: 止损仅移至开仓保本价 actual_entry (零风险防守，绝对不向价格贴近)
+  - 40% ≤ Peak PnL < 100%: LOCK_RATIO = 50% (主升段前期锁定 50% 收益)
+  - Peak PnL ≥ 100% (爆发单): LOCK_RATIO = 100% - max_profit_drawdown_percent (默认 70%, 即顶住最大 30% 利润回退)
 
-计算:
-  lock_in_pct = peak_pnl × LOCK_RATIO
-  price_move = lock_in_pct / 100 / leverage
-  Long: new_sl = entry × (1 + price_move)
-  Short: new_sl = entry × (1 - price_move)
+物理安全距离约束:
+  Long: new_sl = min(raw_sl, mark_price × (1 - 0.006))
+  Short: new_sl = max(raw_sl, mark_price × (1 + 0.006))
 
 棘轮机制: 只向有利方向移动，永不恶化
 

@@ -817,11 +817,18 @@ export default function SniperDashboard({ apiBase }) {
 
             <div>
               <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem', marginBottom: '0.4rem' }}>
-                <span style={{ color: 'var(--color-short)' }}>止损单 (Loss)</span>
+                <span style={{ color: 'var(--color-short)' }}>
+                  非盈利/亏损单 (Loss)
+                  {dashboardData?.breakeven_trades_count > 0 && (
+                    <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginLeft: '6px' }}>
+                      (止损 {dashboardData?.strictly_losing_trades_count || 0} / 保本 {dashboardData?.breakeven_trades_count || 0})
+                    </span>
+                  )}
+                </span>
                 <span style={{ color: 'var(--color-short)' }}>{dashboardData?.losing_trades_count || 0} 笔</span>
               </div>
               <div style={{ height: '8px', background: 'rgba(0,0,0,0.03)', borderRadius: '4px', overflow: 'hidden' }}>
-                <div style={{ height: '100%', width: `${100 - winRate}%`, background: 'var(--color-short)', borderRadius: '4px' }} />
+                <div style={{ height: '100%', width: `${winRate > 0 ? (100 - winRate) : 0}%`, background: 'var(--color-short)', borderRadius: '4px' }} />
               </div>
             </div>
           </div>

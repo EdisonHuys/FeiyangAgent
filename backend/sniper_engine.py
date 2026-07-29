@@ -375,20 +375,18 @@ class SniperEngine:
 
     def _update_trailing_stop_loss(self, t, current_pnl_pct, actual_entry, sig_type, lev, amount):
         """
-        Peak-based 50% trailing stop (峰值盈利 50% 锁定法):
+        Anti-Suffocation Tiered Trailing Stop (防窒息分段阶梯锁利算法):
 
-        - Tracks the highest PnL% ever reached for this position (peak_pnl_pct)
-        - Stop loss always = entry price ± (peak_pnl% × 50%) / leverage
-        - Only activates once PnL reaches ACTIVATION_THRESHOLD (20%)
-        - Only triggers an SL update when the peak advances by at least MIN_PEAK_STEP (5%)
-          to avoid noise-driven API spam on high-leverage positions
-
-        Example (ZEC, 44x leverage, entry $510):
-          Peak PnL 60%  → lock in 30% → SL = $510 × (1 + 30%/44) ≈ $513.48
-          Peak PnL 100% → lock in 50% → SL = $510 × (1 + 50%/44) ≈ $515.80
+        - Peak PnL < 25%: Keep initial technical stop (100% breathing room for early trend incubation).
+        - 25% <= Peak PnL < 40%: Move stop loss to actual_entry (breakeven protection, zero-risk trade).
+        - 40% <= Peak PnL < 100%: Trailing stop activates, locking 50% of peak gains.
+        - Peak PnL >= 100%: High-yield protection, locking 70% of peak gains (max 30% profit giveback).
+        - Safety Buffer: Minimum 0.6% price distance from mark price to avoid noise-driven / spread stops.
         """
-        ACTIVATION_THRESHOLD = 12.0   # minimum PnL% to activate trailing stop (lowered for faster protection)
-        MIN_PEAK_STEP       = 3.0     # min peak advance (%) before updating SL (more responsive)
+        ACTIVATION_THRESHOLD = 25.0   # minimum PnL% to move stop loss to breakeven
+        TRAILING_THRESHOLD   = 40.0   # minimum PnL% to activate ratio-based trailing stop
+        MIN_PEAK_STEP       = 4.0     # min peak advance (%) before updating SL
+        MIN_PRICE_SAFETY_BUFFER = 0.006  # 0.6% minimum price safety distance buffer
 
         cfg = self.state.get("config", {})
         max_drawdown_pct = float(cfg.get("max_profit_drawdown_percent", 30.0) or 30.0)
@@ -400,18 +398,36 @@ class SniperEngine:
 
         peak = t.get("peak_pnl_pct", 0.0)
 
-        # Don't activate until we hit the minimum threshold
+        # 1. Peak PnL < 25%: Keep initial technical stop (give trade 100% breathing room to develop)
         if peak < ACTIVATION_THRESHOLD:
             return False
 
-        # Tiered LOCK_RATIO:
-        # - Peak < 30%: Lock 50% of peak gains (protect capital / small profit)
-        # - 30% <= Peak < 100%: Lock 60% of peak gains
-        # - Peak >= 100%: Lock (100% - max_drawdown_pct), default 70% (withstand max 30% giveback)
+        # 2. 25% <= Peak PnL < 40%: Move stop loss to breakeven (actual_entry) with zero-risk protection
+        if peak < TRAILING_THRESHOLD:
+            breakeven_sl = round(actual_entry, 6)
+            current_sl = t.get("stop_loss")
+            if current_sl is not None and current_sl != "-":
+                try:
+                    current_sl_f = float(current_sl)
+                    if sig_type == "long" and breakeven_sl <= current_sl_f:
+                        return False
+                    if sig_type == "short" and breakeven_sl >= current_sl_f:
+                        return False
+                except (TypeError, ValueError):
+                    pass
+
+            old_sl = t.get("stop_loss", "-")
+            t["stop_loss"] = breakeven_sl
+            t["trailing_sl_level"] = peak
+            t["locked_pnl_percent"] = 0.0
+
+            logger.info(f"[TrailingStop] 🛡️ {t['symbol']} 保本防守生效: 浮盈={round(peak, 1)}% → 止损 ${old_sl} → ${breakeven_sl} (保本价)")
+            self._update_live_sl_order_on_exchange(t, sig_type, amount, breakeven_sl)
+            return True
+
+        # 3. Peak PnL >= 40%: Ratio-based trailing stop
         if peak >= 100.0:
             LOCK_RATIO = max(0.65, 1.0 - (max_drawdown_pct / 100.0))
-        elif peak >= 30.0:
-            LOCK_RATIO = 0.60
         else:
             LOCK_RATIO = 0.50
 
@@ -424,9 +440,23 @@ class SniperEngine:
         lock_in_pct = peak * LOCK_RATIO
         price_move_ratio = lock_in_pct / 100.0 / lev
         if sig_type == "long":
-            new_sl = round(actual_entry * (1 + price_move_ratio), 6)
+            raw_sl = actual_entry * (1 + price_move_ratio)
         else:
-            new_sl = round(actual_entry * (1 - price_move_ratio), 6)
+            raw_sl = actual_entry * (1 - price_move_ratio)
+
+        # Apply Safety Buffer: Ensure SL maintains at least 0.6% price distance from current mark_price
+        mark_price = t.get("mark_price", 0.0) or t.get("current_price", 0.0) or actual_entry
+        if mark_price > 0:
+            if sig_type == "long":
+                max_allowed_sl = mark_price * (1.0 - MIN_PRICE_SAFETY_BUFFER)
+                if raw_sl > max_allowed_sl:
+                    raw_sl = max_allowed_sl
+            else:
+                min_allowed_sl = mark_price * (1.0 + MIN_PRICE_SAFETY_BUFFER)
+                if raw_sl < min_allowed_sl:
+                    raw_sl = min_allowed_sl
+
+        new_sl = round(raw_sl, 6)
 
         # Only move SL in the profitable direction (never worsen it)
         current_sl = t.get("stop_loss")
@@ -446,25 +476,37 @@ class SniperEngine:
         t["locked_pnl_percent"] = round(lock_in_pct, 1)
 
         logger.info(
-            f"[TrailingStop] 🔒 {t['symbol']} 峰值追踪止损更新: "
+            f"[TrailingStop] 🔒 {t['symbol']} 动态阶梯止损更新: "
             f"峰值={round(peak, 1)}% → 锁定 {round(lock_in_pct, 1)}% → "
-            f"止损 ${old_sl} → ${new_sl}  (杠杆 {lev}x)"
+            f"止损 ${old_sl} → ${new_sl}  (杠杆 {lev}x, 保留物理安全距离)"
         )
 
-        # For live positions: cancel old protective SL and replace with new one
+        self._update_live_sl_order_on_exchange(t, sig_type, amount, new_sl)
+
+        self._send_notification(
+            f"🔒 动态追踪止损激活：{t['symbol']}",
+            f"🔒 *【动态止损上移通知】*\n"
+            f"币种：{t['symbol']} ({sig_type.upper()})\n"
+            f"历史峰值浮盈：{round(peak, 1)}%\n"
+            f"已锁定收益：{round(lock_in_pct, 1)}%\n"
+            f"止损已从 ${old_sl} 上移至 ${new_sl}"
+        )
+        return True
+
+    def _update_live_sl_order_on_exchange(self, t, sig_type, amount, new_sl):
+        """Helper to update exchange-side protective SL order cleanly."""
         if t.get("is_live") and amount > 0:
             try:
                 exchange, ex_id = self._init_live_ccxt()
                 symbol = t["symbol"]
                 ccxt_symbol = f"{symbol}:USDT" if ":" not in symbol else symbol
 
-                # 1. Cancel all existing trigger/stop orders on the exchange for this symbol to avoid duplication/pile-up
+                # 1. Cancel all existing trigger/stop orders on the exchange for this symbol
                 try:
                     open_orders = exchange.fetch_open_orders(ccxt_symbol)
                     for order in open_orders:
                         o_id = order.get("id")
                         o_type = str(order.get("type", "")).upper()
-                        # If it is a stop/trigger order (STOP_MARKET, etc.) or reduceOnly, cancel it
                         if "STOP" in o_type or order.get("info", {}).get("reduceOnly") == "true" or order.get("info", {}).get("reduceOnly") is True:
                             try:
                                 exchange.cancel_order(o_id, ccxt_symbol)
@@ -474,7 +516,7 @@ class SniperEngine:
                 except Exception as fetch_e:
                     logger.warning(f"[TrailingStop] 获取挂单清理失败: {fetch_e}")
 
-                # 2. Also try to cancel the stored protective SL order explicitly if it exists
+                # 2. Cancel old protective SL explicitly if recorded
                 old_order_id = t.get("protective_sl_order_id")
                 if old_order_id:
                     try:
@@ -484,23 +526,13 @@ class SniperEngine:
                         pass
                     t["protective_sl_order_id"] = None
 
-                # 3. Place the new trailing SL order
+                # 3. Place new protective SL order
                 new_order_id = self._place_live_protective_sl(exchange, ex_id, symbol, sig_type, amount, new_sl)
                 if new_order_id:
                     t["protective_sl_order_id"] = new_order_id
 
             except Exception as e:
                 logger.warning(f"[TrailingStop] 更新实盘止损单失败 ({t['symbol']}): {e}")
-
-        self._send_notification(
-            f"🔒 动态追踪止损激活：{t['symbol']}",
-            f"🔒 *【动态止损上移通知】*\n"
-            f"币种：{t['symbol']} ({sig_type.upper()})\n"
-            f"历史峰值浮盈：{round(peak, 1)}%\n"
-            f"已锁定收益：{round(lock_in_pct, 1)}%（峰值 × 50%）\n"
-            f"止损已从 ${old_sl} 上移至 ${new_sl}"
-        )
-        return True
 
     def _cancel_protective_sl(self, trade):
         """Cancel the exchange-side protective stop once the position is closed locally."""
@@ -740,7 +772,9 @@ class SniperEngine:
 
         closed_trades = [t for t in filtered_trades if t["status"] in ["closed_tp", "closed_sl"]]
         winning_trades = [t for t in closed_trades if t.get("pnl_usd", 0) > 0]
-        losing_trades = [t for t in closed_trades if t.get("pnl_usd", 0) < 0]
+        losing_trades = [t for t in closed_trades if t.get("pnl_usd", 0) <= 0]
+        strictly_losing_trades = [t for t in closed_trades if t.get("pnl_usd", 0) < 0]
+        breakeven_trades = [t for t in closed_trades if t.get("pnl_usd", 0) == 0]
 
         win_count = len(winning_trades)
         total_closed = len(closed_trades)
@@ -748,7 +782,7 @@ class SniperEngine:
 
         total_pnl = sum(t.get("pnl_usd", 0) for t in closed_trades)
         win_dollars = sum(t.get("pnl_usd", 0) for t in winning_trades)
-        loss_dollars = abs(sum(t.get("pnl_usd", 0) for t in losing_trades))
+        loss_dollars = abs(sum(t.get("pnl_usd", 0) for t in strictly_losing_trades))
 
         profit_factor = round(win_dollars / loss_dollars, 2) if loss_dollars > 0 else (round(win_dollars, 2) if win_dollars > 0 else 1.0)
 
@@ -792,6 +826,8 @@ class SniperEngine:
             "total_trades_count": total_closed,
             "winning_trades_count": win_count,
             "losing_trades_count": len(losing_trades),
+            "strictly_losing_trades_count": len(strictly_losing_trades),
+            "breakeven_trades_count": len(breakeven_trades),
             "profit_factor": profit_factor,
             "active_positions_count": len(active_trades),
             "max_drawdown_usd": round(max_dd_usd, 2),
@@ -1754,6 +1790,13 @@ class SniperEngine:
                 exchange, ex_id = self._init_live_ccxt()
                 ccxt_symbol = f"{symbol}:USDT" if ":" not in symbol else symbol
                 
+                # 🛡️ Force ISOLATED margin mode on exchange before placing live order (protect full account balance)
+                try:
+                    exchange.set_margin_mode("ISOLATED", ccxt_symbol)
+                    logger.info(f"[LiveSniper] 🛡️ 强制切换为逐仓模式 (ISOLATED): {ccxt_symbol}")
+                except Exception as margin_e:
+                    logger.info(f"[LiveSniper] set_margin_mode ISOLATED info ({ccxt_symbol}): {margin_e}")
+
                 try:
                     exchange.set_leverage(lev, ccxt_symbol)
                 except Exception as lev_e:
