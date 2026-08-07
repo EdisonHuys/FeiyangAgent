@@ -2,6 +2,7 @@ import os
 import json
 import re
 import logging
+import time
 from openai import OpenAI
 from datetime import datetime
 
@@ -323,13 +324,29 @@ JSON 结构及字段定义：
                 if "localhost" in base_url_str or "127.0.0.1" in base_url_str:
                     extra_args["extra_body"] = {"options": {"num_ctx": 16384}}
 
-                response = self.client.chat.completions.create(
-                    model=self.model_name,
-                    messages=messages,
-                    temperature=self.temperature,
-                    max_tokens=self.max_tokens,
-                    **extra_args
-                )
+                # Retry mechanism for 429 Too Many Requests
+                max_retries = 3
+                retry_delay = 2
+                
+                for attempt_api in range(max_retries):
+                    try:
+                        response = self.client.chat.completions.create(
+                            model=self.model_name,
+                            messages=messages,
+                            temperature=self.temperature,
+                            max_tokens=self.max_tokens,
+                            **extra_args
+                        )
+                        break
+                    except Exception as e:
+                        err_msg = str(e)
+                        if "429" in err_msg or "TooManyRequests" in err_msg or "ServerOverloaded" in err_msg:
+                            if attempt_api < max_retries - 1:
+                                logger.warning(f"LLM API rate limit / overloaded (429). Retrying in {retry_delay}s... ({attempt_api+1}/{max_retries})")
+                                time.sleep(retry_delay)
+                                retry_delay *= 2
+                                continue
+                        raise e
 
                 content = response.choices[0].message.content
                 logger.info("Received response from LLM.")

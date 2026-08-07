@@ -1434,8 +1434,8 @@ def start_background_monitor():
                             log_monitor_event(f"❌ [诊断失败] {symbol}。原因：{str(inner_e)}")
                             return None
 
-                    # Use ThreadPoolExecutor to run diagnostics concurrently
-                    with ThreadPoolExecutor(max_workers=min(len(symbols), 8)) as executor:
+                    # Use ThreadPoolExecutor to run diagnostics concurrently (limited workers to prevent 429s)
+                    with ThreadPoolExecutor(max_workers=min(len(symbols), 3)) as executor:
                         results = list(executor.map(diagnose_symbol, symbols))
                     
                     # Update last processed_dfs from successful runs
