@@ -1864,6 +1864,7 @@ class SniperEngine:
             "position_size_usd": pos_val,
             "margin_usd": margin,
             "entered_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "filled_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S") if instant_fill else None,
             "closed_at": None,
             "pnl_usd": 0.0,
             "pnl_percent": 0.0,
@@ -2128,6 +2129,7 @@ class SniperEngine:
                     if ord_status == "closed" and t["status"] == "pending":
                         t["status"] = "filled"
                         t["actual_entry"] = float(live_ord.get("average") or live_ord.get("price") or planned_entry)
+                        t["filled_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                         updated = True
 
                         # 🛡️ Exchange-side protective stop: keeps the position
@@ -2220,6 +2222,7 @@ class SniperEngine:
                     if filled_count < max_active:
                         t["status"] = "filled"
                         t["actual_entry"] = planned_entry
+                        t["filled_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                         if not t.get("is_live"):
                             _, maker_fee, _ = self._fee_rates()
                             entry_fee = self._record_fee(t, pos_val, maker_fee)
@@ -2301,7 +2304,8 @@ class SniperEngine:
             # ⏰ Time-based stop: close stale positions that haven't reached TP1 after 72h
             if t["status"] == "filled" and not t.get("tp1_partial_closed"):
                 try:
-                    entered_dt = datetime.strptime(t.get("entered_at", ""), "%Y-%m-%d %H:%M:%S")
+                    fill_dt_str = t.get("filled_at") or t.get("entered_at", "")
+                    entered_dt = datetime.strptime(fill_dt_str, "%Y-%m-%d %H:%M:%S")
                     hold_hours = (datetime.now() - entered_dt).total_seconds() / 3600.0
                 except Exception:
                     hold_hours = 0.0
