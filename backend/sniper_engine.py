@@ -989,19 +989,11 @@ class SniperEngine:
                     synced_trades = []
                     
                     for t in filtered:
-                        if t["status"] in ["filled", "tp1_hit", "closed_tp", "closed_sl"]:
+                        if t["status"] in ["filled", "tp1_hit"]:
                             symbol = t["symbol"]
                             side = t["signal_type"].lower()
                             key = (symbol, side)
                             if key in real_pos_map:
-                                # Self-healing: if trade was mistakenly closed in DB but still active on exchange, restore it!
-                                if t["status"] in ["closed_tp", "closed_sl"]:
-                                    logger.info(f"[SniperEngine] Self-healing: Position {symbol} ({side}) is still active on exchange. Restoring status to filled.")
-                                    t["status"] = "filled"
-                                    t["closed_at"] = None
-                                    t["close_reason"] = ""
-                                    updated = True
-                                
                                 # Update system active trade stats with real exchange stats
                                 real_pos = real_pos_map[key]
                                 t["current_price"] = real_pos["mark_price"]
