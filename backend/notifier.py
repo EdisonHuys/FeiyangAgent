@@ -5,11 +5,12 @@ import os
 logger = logging.getLogger(__name__)
 
 class Notifier:
-    def __init__(self, config):
+    def __init__(self, config, data_dir=None):
         """
         Initialize the Notifier using config dict.
         """
         self.config = config.get("notifications", {})
+        self.data_dir = data_dir or os.getcwd()
         self.enabled = self.config.get("enabled", False)
         self.channels = self.config.get("channels", [])
         
@@ -30,7 +31,7 @@ class Notifier:
         Always saves the report locally in the workspace as 'latest_report.md'.
         """
         # Always write locally first
-        local_filename = "latest_report.md"
+        local_filename = os.path.join(self.data_dir, "latest_report.md")
         try:
             with open(local_filename, "w", encoding="utf-8") as f:
                 f.write(f"# {title}\n\n{content}")

@@ -5,13 +5,14 @@
    ═══════════════════════════════════════════════════════ */
 
 :root {
-  /* ─── macOS 27 Golden Gate Liquid Glass (Dark Sunset Theme) ─── */
-  --glass-bg: rgba(12, 14, 26, 0.42);
-  --glass-bg-elevated: rgba(22, 25, 45, 0.65);
-  --glass-bg-hover: rgba(32, 36, 62, 0.75);
-  --glass-border: rgba(255, 215, 0, 0.08);
-  --glass-border-strong: rgba(255, 215, 0, 0.15);
-  --glass-highlight: rgba(255, 215, 0, 0.18);
+  /* ─── macOS Golden Gate Liquid Glass (Authentic Dark Theme) ─── */
+  --glass-bg: rgba(20, 24, 34, 0.5);
+  --glass-bg-elevated: rgba(30, 34, 48, 0.65);
+  --glass-bg-hover: rgba(38, 44, 62, 0.75);
+  --glass-border: rgba(255, 255, 255, 0.1);
+  --glass-border-strong: rgba(255, 255, 255, 0.18);
+  --border-color: rgba(255, 255, 255, 0.08);
+  --glass-highlight: rgba(255, 255, 255, 0.15);
   --glass-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
   --glass-shadow-elevated: 0 16px 48px rgba(0, 0, 0, 0.65);
   --glass-blur: 40px;
@@ -190,6 +191,18 @@ body {
   box-shadow: var(--glass-shadow);
 }
 
+/* Helper for LiquidGlass navbar */
+.navbar.liquid-navbar {
+  background: rgba(22, 25, 45, 0.35) !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  border: none !important;
+  box-shadow: none !important;
+}
+.navbar.liquid-navbar::after {
+  display: none !important;
+}
+
 .navbar::after {
   content: '';
   position: absolute;
@@ -298,11 +311,12 @@ body {
 .dashboard-grid {
   display: grid;
   grid-template-columns: 3fr 2fr;
-  gap: 1rem;
-  padding: 1rem;
+  gap: 0.75rem;
+  padding: 0.75rem 1rem 1rem;
   flex: 1;
   overflow: hidden;
-  height: calc(100vh - 72px);
+  height: 100%;
+  min-height: 0;
 }
 
 @media (max-width: 1024px) {
@@ -316,17 +330,18 @@ body {
 .column-left {
   display: flex;
   flex-direction: column;
-  gap: 1rem;
+  gap: 0.75rem;
   height: 100%;
+  min-height: 0;
 }
 
 .column-right {
   display: flex;
   flex-direction: column;
-  gap: 1rem;
+  gap: 0.75rem;
   height: 100%;
-  overflow-y: auto;
-  padding-right: 2px;
+  min-height: 0;
+  overflow: hidden;
 }
 
 /* ═══════════════════════════════════════════════════════
@@ -338,13 +353,22 @@ body {
   border-radius: var(--radius-lg);
   backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturation));
   -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturation));
-  padding: 1.25rem;
+  padding: 1rem;
   display: flex;
   flex-direction: column;
   position: relative;
   overflow: hidden;
   box-shadow: var(--glass-shadow);
   transition: box-shadow 0.3s ease, border-color 0.3s ease;
+}
+
+/* Ensure LiquidGlass panels fill their grid/flex parent properly */
+.liquid-glass-panel.panel {
+  min-height: 0;
+}
+.liquid-glass-panel.panel > div:last-child {
+  flex: 1;
+  min-height: 0;
 }
 
 /* Top edge highlight — light catching glass */
@@ -389,7 +413,7 @@ body {
    ═══════════════════════════════════════════════════════ */
 .chart-panel {
   flex: 1;
-  min-height: 400px;
+  min-height: 0;
 }
 
 .chart-container-div {
@@ -462,20 +486,20 @@ body {
 }
 
 .parameter-card {
-  background: rgba(255, 255, 255, 0.55);
-  border: 1px solid var(--glass-border);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: var(--radius-md);
   padding: 0.8rem;
   text-align: center;
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.03);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
   transition: all 0.2s ease;
 }
 
 .parameter-card:hover {
-  background: rgba(255, 255, 255, 0.75);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+  background: rgba(255, 255, 255, 0.08);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
 }
 
 .param-label {
@@ -595,6 +619,15 @@ body {
   color: var(--text-muted);
 }
 
+.form-help {
+  display: block;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  margin-top: 0.3rem;
+  line-height: 1.4;
+  opacity: 0.8;
+}
+
 select.form-control {
   appearance: none;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23cbd5e1' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
@@ -697,6 +730,10 @@ select.form-control {
 
 @keyframes spin {
   to { transform: rotate(360deg); }
+}
+
+.spin {
+  animation: spin 1s linear infinite;
 }
 
 .pulse-indicator {
@@ -878,7 +915,7 @@ select.form-control {
   backdrop-filter: blur(24px) saturate(160%);
   -webkit-backdrop-filter: blur(24px) saturate(160%);
   box-shadow: var(--glass-shadow);
-  transition: all 0.25s ease;
+  transition: transform 0.25s ease, box-shadow 0.25s ease, border-color 0.25s ease;
 }
 
 .sniper-card::before {
@@ -893,7 +930,6 @@ select.form-control {
 
 .sniper-card:hover {
   border-color: var(--glass-border-strong);
-  transform: translateY(-2px);
   box-shadow: var(--glass-shadow-elevated);
 }
 

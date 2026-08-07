@@ -83,6 +83,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+import platform
+import shutil
+
 # Resolve CONFIG_PATH and ENV_PATH dynamically based on PyInstaller execution (sys.frozen)
 if getattr(sys, 'frozen', False):
     exec_dir = os.path.dirname(sys.executable)
@@ -95,16 +98,38 @@ if getattr(sys, 'frozen', False):
 else:
     root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-CONFIG_PATH = os.path.join(root_dir, "config.yaml")
-ENV_PATH = os.path.join(root_dir, ".env")
-STATE_FILE_PATH = os.path.join(root_dir, "last_signals.json")
-PROMPT_PATH = os.path.join(root_dir, "feiyang_prompt.txt")
+def get_data_dir():
+    home = os.path.expanduser("~")
+    if platform.system() == "Darwin":
+        return os.path.join(home, "Library", "Application Support", "FeiyangAgent")
+    elif platform.system() == "Windows":
+        return os.path.join(os.environ.get("APPDATA", home), "FeiyangAgent")
+    else:
+        return os.path.join(home, ".feiyang_agent")
+
+data_dir = get_data_dir()
+os.makedirs(data_dir, exist_ok=True)
+
+# Copy defaults if not exist
+for filename in ["config.yaml", ".env", "feiyang_prompt.txt"]:
+    src = os.path.join(root_dir, filename)
+    dst = os.path.join(data_dir, filename)
+    if not os.path.exists(dst) and os.path.exists(src):
+        try:
+            shutil.copy2(src, dst)
+        except Exception as e:
+            pass
+
+CONFIG_PATH = os.path.join(data_dir, "config.yaml")
+ENV_PATH = os.path.join(data_dir, ".env")
+STATE_FILE_PATH = os.path.join(data_dir, "last_signals.json")
+PROMPT_PATH = os.path.join(data_dir, "feiyang_prompt.txt")
 
 # Load environment variables using absolute ENV_PATH to support WKWebView context and frozen execution CWD changes
 load_dotenv(ENV_PATH)
 
-sniper_engine = SniperEngine(root_dir)
-backtest_runner = BacktestRunner(root_dir)
+sniper_engine = SniperEngine(data_dir)
+backtest_runner = BacktestRunner(data_dir)
 
 signals_lock = threading.Lock()
 
@@ -139,7 +164,7 @@ def process_signal_evaluation(symbol: str, payload: dict, json_signal: dict, mar
     """
     # Save the latest report for this symbol
     try:
-        reports_file = os.path.join(root_dir, "last_reports.json")
+        reports_file = os.path.join(data_dir, "last_reports.json")
         with reports_lock:
             reports_data = {}
             if os.path.exists(reports_file):
@@ -297,7 +322,7 @@ def process_signal_evaluation(symbol: str, payload: dict, json_signal: dict, mar
                 )
 
                 try:
-                    notifier = Notifier(yaml_cfg)
+                    notifier = Notifier(yaml_cfg, data_dir)
                     notifier.send_notification(f"{source_tag}：{symbol}", signal_header + markdown_report)
                     log_monitor_event(f"📬 [{source_tag}] {symbol} 交易警报已送达。")
                 except Exception as ne:
@@ -537,7 +562,7 @@ def clear_monitor_logs():
 
 @app.get("/api/reports/latest")
 def get_latest_report(symbol: str = "BTC/USDT"):
-    reports_file = os.path.join(root_dir, "last_reports.json")
+    reports_file = os.path.join(data_dir, "last_reports.json")
     if os.path.exists(reports_file):
         with reports_lock:
             try:
@@ -763,8 +788,8 @@ def run_analysis(req: AnalysisRequest):
                 model_name=model_name,
                 temperature=temperature,
                 max_tokens=max_tokens,
-                system_prompt=load_system_prompt(root_dir),
-                root_dir=root_dir
+                system_prompt=load_system_prompt(data_dir),
+                root_dir=data_dir
             )
 
             # 3. Call LLM (with dual-call consensus if enabled)
@@ -916,10 +941,10 @@ def get_sniper_dashboard():
     return sniper_engine.get_dashboard_data()
 
 @app.get("/api/sniper/trades")
-def get_sniper_trades():
+def get_sniper_trades(mode: Optional[str] = None):
     return {
         "status": "success",
-        "trades": sniper_engine.get_trades()
+        "trades": sniper_engine.get_trades(mode_filter=mode)
     }
 
 @app.post("/api/sniper/sync-positions-force")
@@ -933,8 +958,8 @@ def sync_positions_force():
         sniper_engine._exchange_instance = None
         sniper_engine._last_positions_error = None
         
-        # Trigger positions sync (will call exchange fresh)
-        trades_list = sniper_engine.get_trades()
+        # Trigger positions sync (will call exchange fresh for live mode)
+        trades_list = sniper_engine.get_trades(mode_filter="live")
         
         # Check if the fetch failed and recorded an error
         if sniper_engine._last_positions_error:
@@ -1243,30 +1268,36 @@ def start_background_monitor():
     import time
     from threading import Thread
     
-    # 1. Thread 1: 10-Second Fast Price Check & Fill Trigger Loop
+    # 1. Thread 1: Fast Price Check & Fill Trigger Loop
+    # Live mode: 3s polling (critical — 50x leverage liquidation is ~2% from entry)
+    # Paper mode: 5s polling (no liquidation risk)
     def fast_price_check_loop():
         time.sleep(5)
-        logger.info("Fast Price Check Loop (10s) started.")
+        logger.info("Fast Price Check Loop started (adaptive interval).")
         while True:
+            poll_interval = 5  # default for paper mode
             try:
                 yaml_cfg = load_yaml_config()
                 symbols = yaml_cfg.get("symbols", ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "ZEC/USDT"])
                 exchange_id = yaml_cfg.get("exchange", "binance")
-                
+
                 sniper_cfg = sniper_engine.get_config()
                 sniper_mode = sniper_cfg.get("mode", "off")
-                
+
+                if sniper_mode == "live":
+                    poll_interval = 3  # Aggressive polling for live mode
+                elif sniper_mode == "paper":
+                    poll_interval = 5
+
                 if sniper_mode != "off" and symbols:
                     fetcher = get_data_fetcher(exchange_id)
-                    # Batched lightweight ticker fetch (1 request) instead of
-                    # per-symbol kline requests on every 10s tick
                     prices_dict = fetcher.fetch_latest_prices(symbols)
 
                     if prices_dict:
                         sniper_engine.check_market_prices(prices_dict)
             except Exception as e:
-                logger.warning(f"[FastPriceCheck] Error in 10s loop: {e}")
-            time.sleep(10)
+                logger.warning(f"[FastPriceCheck] Error in loop: {e}")
+            time.sleep(poll_interval)
 
     def _compute_dynamic_scan_interval(base_mins, processed_dfs):
         """
@@ -1390,8 +1421,8 @@ def start_background_monitor():
                                 model_name=model_name,
                                 temperature=temperature,
                                 max_tokens=max_tokens,
-                                system_prompt=load_system_prompt(root_dir),
-                                root_dir=root_dir
+                                system_prompt=load_system_prompt(data_dir),
+                                root_dir=data_dir
                             )
                             # Dual-call consensus: only trade when LLM agrees with itself
                             consensus_on = yaml_cfg.get("llm", {}).get("consensus_enabled", True)

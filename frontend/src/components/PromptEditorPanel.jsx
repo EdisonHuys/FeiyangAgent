@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Save, Loader2, RefreshCw, Copy, Check, ShieldAlert, Sparkles, Brain } from 'lucide-react';
+import LiquidGlass from './LiquidGlass';
 
 export default function PromptEditorPanel({ apiBase, standalone = true }) {
   const [promptText, setPromptText] = useState('');
@@ -308,8 +309,17 @@ export default function PromptEditorPanel({ apiBase, standalone = true }) {
   }
 
   return (
-    <div className="panel" style={{ height: '100%', overflowY: 'auto', padding: '1.5rem' }}>
+    <LiquidGlass
+      className="panel liquid-panel"
+      displacementScale={30}
+      blurAmount={0.0625}
+      saturation={140}
+      aberrationIntensity={2}
+      cornerRadius={12}
+      padding="1rem"
+      style={{ height: '100%', overflowY: 'auto' }}
+    >
       {content}
-    </div>
+    </LiquidGlass>
   );
 }

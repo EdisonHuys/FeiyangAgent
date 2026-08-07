@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Save, Loader2, ShieldCheck } from 'lucide-react';
+import LiquidGlass from './LiquidGlass';
 
 export default function SettingsPanel({ apiBase }) {
   const [config, setConfig] = useState({
@@ -243,7 +244,17 @@ export default function SettingsPanel({ apiBase }) {
   }
 
   return (
-    <form onSubmit={handleSave} className="panel" style={{ gap: '1rem', height: '100%', overflowY: 'auto' }}>
+    <LiquidGlass
+      className="panel liquid-panel"
+      displacementScale={30}
+      blurAmount={0.0625}
+      saturation={140}
+      aberrationIntensity={2}
+      cornerRadius={12}
+      padding="1.5rem"
+      style={{ height: '100%', overflowY: 'auto' }}
+    >
+      <form onSubmit={handleSave} style={{ display: 'flex', flexDirection: 'column', gap: '1rem', height: '100%' }}>
       <div className="panel-header">
         <div className="panel-title">
           <ShieldCheck size={20} className="pulse-indicator" style={{ background: 'var(--color-wait)', boxShadow: '0 0 0 0 rgba(41, 121, 255, 0.4)' }} />
@@ -674,6 +685,7 @@ export default function SettingsPanel({ apiBase }) {
         </div>
       </div>
 
-    </form>
+      </form>
+    </LiquidGlass>
   );
 }

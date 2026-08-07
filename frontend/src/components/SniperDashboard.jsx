@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Target, TrendingUp, ShieldAlert, Award, Activity, Settings, RefreshCw, Layers, CheckCircle2, AlertCircle, Key, Lock, Server, RotateCcw } from 'lucide-react';
 import SentimentPanel from './SentimentPanel';
+import LiquidGlass from './LiquidGlass';
 
 export default function SniperDashboard({ apiBase }) {
   const [dashboardData, setDashboardData] = useState(null);
@@ -13,26 +14,29 @@ export default function SniperDashboard({ apiBase }) {
   const [historyFilter, setHistoryFilter] = useState('pending'); // 'all', 'pending', 'closed_tp', 'closed_sl', 'cancelled'
 
   // Saved Config from backend
-  const [formConfig, setFormConfig] = useState({
-    mode: 'paper',
-    account_balance: 10000,
-    risk_per_trade_percent: 2.0,
-    margin_mode: 'smart',
-    margin_percent: 5.0,
-    fixed_margin_amount: 20.0,
-    max_profit_drawdown_percent: 30.0,
-    enable_exchange_sl: true,
-    max_active_trades: 3,
-    min_confidence: 7,
-    max_leverage: 15,
-    live_exchange: 'binance',
-    live_api_key: '',
-    live_secret: '',
-    live_passphrase: '',
-    live_trading_mode: 'swap',
-    daily_max_loss_percent: 6,
-    pending_ttl_hours: 24,
-    max_trade_loss_percent: 50.0
+  const [formConfig, setFormConfig] = useState(() => {
+    const savedMode = localStorage.getItem('sniper_mode') || 'paper';
+    return {
+      mode: savedMode,
+      account_balance: 10000,
+      risk_per_trade_percent: 2.0,
+      margin_mode: 'smart',
+      margin_percent: 5.0,
+      fixed_margin_amount: 20.0,
+      max_profit_drawdown_percent: 30.0,
+      enable_exchange_sl: true,
+      max_active_trades: 3,
+      min_confidence: 8,
+      max_leverage: 15,
+      live_exchange: 'binance',
+      live_api_key: '',
+      live_secret: '',
+      live_passphrase: '',
+      live_trading_mode: 'swap',
+      daily_max_loss_percent: 6,
+      pending_ttl_hours: 24,
+      max_trade_loss_percent: 50.0
+    };
   });
 
   // Modal Draft Config (completely isolated from background polling)
@@ -43,33 +47,49 @@ export default function SniperDashboard({ apiBase }) {
 
   const canvasRef = useRef(null);
 
-  const fetchData = async () => {
-    try {
+  const isFetchingRef = useRef(false);
+
+  const fetchData = async (isInitial = false) => {
+    if (isFetchingRef.current) return;
+    isFetchingRef.current = true;
+
+    if (isInitial && !dashboardData) {
       setLoading(true);
+    }
+    try {
+      const currentMode = localStorage.getItem('sniper_mode') || formConfig.mode || 'paper';
       const [dashRes, tradesRes] = await Promise.all([
         fetch(`${apiBase}/api/sniper/dashboard`),
-        fetch(`${apiBase}/api/sniper/trades`)
+        fetch(`${apiBase}/api/sniper/trades?mode=${currentMode}`)
       ]);
       const dashJson = await dashRes.json();
       const tradesJson = await tradesRes.json();
 
-      setDashboardData(dashJson);
-      if (dashJson.config) {
-        setFormConfig(prev => ({ ...prev, ...dashJson.config }));
+      if (dashJson && typeof dashJson.account_balance !== 'undefined') {
+        setDashboardData(dashJson);
+        if (dashJson.config) {
+          if (dashJson.config.mode) {
+            localStorage.setItem('sniper_mode', dashJson.config.mode);
+          }
+          setFormConfig(prev => ({ ...prev, ...dashJson.config }));
+        }
       }
-      setTrades(tradesJson.trades || []);
+      if (tradesJson && Array.isArray(tradesJson.trades)) {
+        setTrades(tradesJson.trades);
+      }
     } catch (err) {
       console.error("Failed to fetch sniper data:", err);
     } finally {
       setLoading(false);
+      isFetchingRef.current = false;
     }
   };
 
   useEffect(() => {
-    fetchData();
-    const interval = setInterval(fetchData, 5000);
+    fetchData(true);
+    const interval = setInterval(() => fetchData(false), 5000);
     return () => clearInterval(interval);
-  }, [apiBase]);
+  }, [apiBase, formConfig.mode]);
 
   // Smart price formatter
   const formatPrice = (val) => {
@@ -181,7 +201,7 @@ export default function SniperDashboard({ apiBase }) {
       if ('risk_per_trade_percent' in sanitized) sanitized.risk_per_trade_percent = parseFloat(sanitized.risk_per_trade_percent) || 2.0;
       if ('max_leverage' in sanitized) sanitized.max_leverage = parseInt(sanitized.max_leverage) || 15;
       if ('max_active_trades' in sanitized) sanitized.max_active_trades = parseInt(sanitized.max_active_trades) || 3;
-      if ('min_confidence' in sanitized) sanitized.min_confidence = parseInt(sanitized.min_confidence) || 7;
+      if ('min_confidence' in sanitized) sanitized.min_confidence = parseInt(sanitized.min_confidence) || 8;
       if ('daily_max_loss_percent' in sanitized) { const v = parseFloat(sanitized.daily_max_loss_percent); sanitized.daily_max_loss_percent = isNaN(v) ? 6.0 : v; }
       if ('pending_ttl_hours' in sanitized) { const v = parseFloat(sanitized.pending_ttl_hours); sanitized.pending_ttl_hours = isNaN(v) ? 24.0 : v; }
       if ('max_trade_loss_percent' in sanitized) { const v = parseFloat(sanitized.max_trade_loss_percent); sanitized.max_trade_loss_percent = isNaN(v) ? 50.0 : v; }
@@ -204,6 +224,7 @@ export default function SniperDashboard({ apiBase }) {
   };
 
   const handleModeChange = (newMode) => {
+    localStorage.setItem('sniper_mode', newMode);
     setFormConfig(prev => ({ ...prev, mode: newMode }));
     handleSaveConfig({ mode: newMode });
   };
@@ -338,7 +359,7 @@ export default function SniperDashboard({ apiBase }) {
 
   if (loading && !dashboardData) {
     return (
-      <div className="loader-wrapper py-20">
+      <div className="loader-wrapper">
         <div className="spinner"></div>
         <p>正在加载飞扬精准狙击系统仪表盘...</p>
       </div>
@@ -352,14 +373,15 @@ export default function SniperDashboard({ apiBase }) {
   return (
     <div className="sniper-container">
       {/* 1. Top Header & Control Center */}
-      <div className="sniper-header" style={{
-        background: 'var(--glass-bg)',
-        border: '1px solid var(--glass-border)',
-        borderRadius: '12px',
-        padding: '1.25rem 1.5rem',
-        boxShadow: 'var(--glass-shadow)',
-        backdropFilter: 'blur(30px)'
-      }}>
+      <LiquidGlass
+        className="sniper-header liquid-panel"
+        displacementScale={20}
+        blurAmount={0.06}
+        saturation={130}
+        aberrationIntensity={1}
+        cornerRadius={12}
+        padding="1rem"
+      >
         <div className="sniper-header-left">
           <div className="sniper-icon-badge" style={{
             background: 'rgba(0, 122, 255, 0.08)',
@@ -443,10 +465,10 @@ export default function SniperDashboard({ apiBase }) {
             style={{ padding: '0.4rem', display: 'flex', alignItems: 'center' }}
             title="刷新数据"
           >
-            <RefreshCw size={15} className={loading ? 'spinner' : ''} />
+            <RefreshCw size={15} className={loading ? 'spin' : ''} />
           </button>
         </div>
-      </div>
+      </LiquidGlass>
 
       {/* 1b. Circuit Breaker Halted Banner */}
       {dashboardData?.circuit_breaker?.halted && (
@@ -478,7 +500,16 @@ export default function SniperDashboard({ apiBase }) {
       {/* 2. Key Telemetry Metric Cards */}
       <div className="sniper-grid">
         {/* Win Rate */}
-        <div className="sniper-card" style={{ background: 'var(--glass-bg)', border: '1px solid rgba(245, 158, 11, 0.25)' }}>
+        <LiquidGlass
+          className="sniper-card liquid-panel"
+          displacementScale={15}
+          blurAmount={0.05}
+          saturation={130}
+          aberrationIntensity={1}
+          cornerRadius={10}
+          padding="1rem"
+          style={{ border: '1px solid rgba(245, 158, 11, 0.25)' }}
+        >
           <div className="sniper-card-header">
             <span>交易胜率 (Win Rate)</span>
             <Award size={18} style={{ color: '#f59e0b' }} />
@@ -489,10 +520,19 @@ export default function SniperDashboard({ apiBase }) {
           <div className="sniper-card-sub">
             样本数据: {dashboardData?.winning_trades_count || 0} 胜 / {dashboardData?.total_trades_count || 0} 单
           </div>
-        </div>
+        </LiquidGlass>
 
         {/* Net Profit */}
-        <div className="sniper-card" style={{ background: 'var(--glass-bg)', border: `1px solid ${netProfit >= 0 ? 'rgba(16, 185, 129, 0.25)' : 'rgba(244, 63, 94, 0.25)'}` }}>
+        <LiquidGlass
+          className="sniper-card liquid-panel"
+          displacementScale={15}
+          blurAmount={0.05}
+          saturation={130}
+          aberrationIntensity={1}
+          cornerRadius={10}
+          padding="1rem"
+          style={{ border: `1px solid ${netProfit >= 0 ? 'rgba(16, 185, 129, 0.25)' : 'rgba(244, 63, 94, 0.25)'}` }}
+        >
           <div className="sniper-card-header">
             <span>已实现累计净收益</span>
             <TrendingUp size={18} style={{ color: netProfit >= 0 ? '#10b981' : '#f43f5e' }} />
@@ -501,12 +541,21 @@ export default function SniperDashboard({ apiBase }) {
             {netProfit >= 0 ? '+' : ''}${netProfit.toFixed(2)} USD
           </div>
           <div className="sniper-card-sub">
-            可用账户余额: <strong style={{ color: 'var(--text-bright)' }}>${dashboardData?.account_balance}</strong>
+            可用账户余额: <strong style={{ color: 'var(--text-bright)' }}>${formatPrice(dashboardData?.account_balance ?? 0)} USD</strong>
           </div>
-        </div>
+        </LiquidGlass>
 
         {/* Leverage & Risk */}
-        <div className="sniper-card" style={{ background: 'var(--glass-bg)', border: '1px solid rgba(56, 189, 248, 0.25)' }}>
+        <LiquidGlass
+          className="sniper-card liquid-panel"
+          displacementScale={15}
+          blurAmount={0.05}
+          saturation={130}
+          aberrationIntensity={1}
+          cornerRadius={10}
+          padding="1rem"
+          style={{ border: '1px solid rgba(56, 189, 248, 0.25)' }}
+        >
           <div className="sniper-card-header">
             <span>风控偏好与杠杆模式</span>
             <ShieldAlert size={18} style={{ color: '#38bdf8' }} />
@@ -523,10 +572,19 @@ export default function SniperDashboard({ apiBase }) {
                 : `智能控仓 (风控 ${formConfig.risk_per_trade_percent}%)`}
             </strong>
           </div>
-        </div>
+        </LiquidGlass>
 
         {/* Active Positions */}
-        <div className="sniper-card" style={{ background: 'var(--glass-bg)', border: '1px solid rgba(192, 132, 252, 0.25)' }}>
+        <LiquidGlass
+          className="sniper-card liquid-panel"
+          displacementScale={15}
+          blurAmount={0.05}
+          saturation={130}
+          aberrationIntensity={1}
+          cornerRadius={10}
+          padding="1rem"
+          style={{ border: '1px solid rgba(192, 132, 252, 0.25)' }}
+        >
           <div className="sniper-card-header">
             <span>实时埋伏/活跃仓位</span>
             <Layers size={18} style={{ color: '#c084fc' }} />
@@ -537,10 +595,19 @@ export default function SniperDashboard({ apiBase }) {
           <div className="sniper-card-sub">
             平台及引擎: <strong style={{ color: 'var(--text-bright)' }}>{(formConfig.live_exchange || 'binance').toUpperCase()} ({mode.toUpperCase()})</strong>
           </div>
-        </div>
+        </LiquidGlass>
 
         {/* Max Drawdown */}
-        <div className="sniper-card" style={{ background: 'var(--glass-bg)', border: '1px solid rgba(244, 63, 94, 0.25)' }}>
+        <LiquidGlass
+          className="sniper-card liquid-panel"
+          displacementScale={15}
+          blurAmount={0.05}
+          saturation={130}
+          aberrationIntensity={1}
+          cornerRadius={10}
+          padding="1rem"
+          style={{ border: '1px solid rgba(244, 63, 94, 0.25)' }}
+        >
           <div className="sniper-card-header">
             <span>历史最大回撤 (Max DD)</span>
             <Activity size={18} style={{ color: '#f43f5e' }} />
@@ -551,10 +618,19 @@ export default function SniperDashboard({ apiBase }) {
           <div className="sniper-card-sub">
             回撤金额: <strong style={{ color: 'var(--text-bright)' }}>-${dashboardData?.max_drawdown_usd || 0} USD</strong>
           </div>
-        </div>
+        </LiquidGlass>
 
         {/* Circuit Breaker & Trading Costs */}
-        <div className="sniper-card" style={{ background: 'var(--glass-bg)', border: `1px solid ${dashboardData?.circuit_breaker?.halted ? 'rgba(244, 63, 94, 0.25)' : 'rgba(16, 185, 129, 0.25)'}` }}>
+        <LiquidGlass
+          className="sniper-card liquid-panel"
+          displacementScale={15}
+          blurAmount={0.05}
+          saturation={130}
+          aberrationIntensity={1}
+          cornerRadius={10}
+          padding="1rem"
+          style={{ border: `1px solid ${dashboardData?.circuit_breaker?.halted ? 'rgba(244, 63, 94, 0.25)' : 'rgba(16, 185, 129, 0.25)'}` }}
+        >
           <div className="sniper-card-header">
             <span>日内熔断与交易成本</span>
             <ShieldAlert size={18} style={{ color: dashboardData?.circuit_breaker?.halted ? '#f43f5e' : '#10b981' }} />
@@ -566,14 +642,23 @@ export default function SniperDashboard({ apiBase }) {
             今日盈亏: <strong style={{ color: (dashboardData?.circuit_breaker?.day_realized_pnl ?? 0) >= 0 ? '#10b981' : '#f43f5e' }}>{dashboardData?.circuit_breaker?.day_realized_pnl ?? 0} USD</strong>
             {' '}| 累计手续费: <strong style={{ color: 'var(--text-bright)' }}>${dashboardData?.total_fees_usd || 0}</strong>
           </div>
-        </div>
+        </LiquidGlass>
       </div>
 
       {/* 3. Real-Time Active Open Positions Section (Moved to Top) */}
       {(() => {
         const activePositions = trades.filter(t => t.status === 'filled' || t.status === 'tp1_hit');
         return (
-          <div className="sniper-panel" style={{ padding: 0, overflow: 'hidden', border: '1px solid rgba(52, 199, 89, 0.2)', boxShadow: '0 4px 20px rgba(52, 199, 89, 0.05)' }}>
+          <LiquidGlass
+            className="sniper-panel liquid-panel"
+            displacementScale={25}
+            blurAmount={0.06}
+            saturation={135}
+            aberrationIntensity={1.5}
+            cornerRadius={12}
+            padding="0"
+            style={{ overflow: 'hidden', border: '1px solid rgba(52, 199, 89, 0.2)', boxShadow: '0 4px 20px rgba(52, 199, 89, 0.05)' }}
+          >
             <div style={{ padding: '1rem 1.25rem', borderBottom: '1px solid var(--border-color)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: 'rgba(52, 199, 89, 0.04)' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
                 <div style={{ width: '10px', height: '10px', borderRadius: '50%', background: activePositions.length > 0 ? '#34c759' : '#86868b', boxShadow: activePositions.length > 0 ? '0 0 12px #34c759' : 'none' }}></div>
@@ -677,13 +762,13 @@ export default function SniperDashboard({ apiBase }) {
                           </td>
 
                           <td style={{ fontWeight: '600' }}>
-                          ${formatPrice(t.actual_entry || t.planned_entry)}
+                            {formatPrice(t.actual_entry || t.planned_entry) === '-' ? '-' : `$${formatPrice(t.actual_entry || t.planned_entry)}`}
                           </td>
 
                           {/* Explicit Real-Time Price Column */}
                           <td>
                             <strong style={{ color: '#b25000', fontFamily: 'monospace', fontSize: '0.95rem' }}>
-                              ${formatPrice(t.current_price)}
+                              {formatPrice(t.current_price) === '-' ? '-' : `$${formatPrice(t.current_price)}`}
                             </strong>
                           </td>
 
@@ -702,12 +787,12 @@ export default function SniperDashboard({ apiBase }) {
                               return (
                                 <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
                                   <span style={{ color: isProfitableSL ? 'var(--color-long)' : 'var(--color-short)' }}>
-                                    ${formatPrice(t.stop_loss)}
+                                    {formatPrice(t.stop_loss) === '-' ? '-' : `$${formatPrice(t.stop_loss)}`}
                                   </span>
                                   
                                   {t.initial_stop_loss && formatPrice(t.initial_stop_loss) !== formatPrice(t.stop_loss) && (
                                     <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)', fontWeight: 'normal' }} title="初始防守止损线">
-                                      (初始: ${formatPrice(t.initial_stop_loss)})
+                                      (初始: {formatPrice(t.initial_stop_loss) === '-' ? '-' : `$${formatPrice(t.initial_stop_loss)}`})
                                     </span>
                                   )}
                                   
@@ -775,14 +860,22 @@ export default function SniperDashboard({ apiBase }) {
                 </table>
               </div>
             )}
-          </div>
+          </LiquidGlass>
         );
       })()}
 
       {/* 4. Visual Charts Section */}
       <div className="sniper-chart-section">
         {/* Cumulative Profit Trend Line Chart */}
-        <div className="sniper-panel">
+        <LiquidGlass
+          className="sniper-panel liquid-panel"
+          displacementScale={25}
+          blurAmount={0.06}
+          saturation={135}
+          aberrationIntensity={1.5}
+          cornerRadius={12}
+          padding="1rem"
+        >
           <div className="sniper-panel-title">
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
               <TrendingUp size={18} style={{ color: 'var(--color-long)' }} />
@@ -796,10 +889,18 @@ export default function SniperDashboard({ apiBase }) {
             height={200}
             style={{ width: '100%', height: '200px', background: 'rgba(0,0,0,0.03)', borderRadius: '8px' }}
           />
-        </div>
+        </LiquidGlass>
 
         {/* Win/Loss Analytics Bar */}
-        <div className="sniper-panel">
+        <LiquidGlass
+          className="sniper-panel liquid-panel"
+          displacementScale={25}
+          blurAmount={0.06}
+          saturation={135}
+          aberrationIntensity={1.5}
+          cornerRadius={12}
+          padding="1rem"
+        >
           <div className="sniper-panel-title">
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
               <Award size={18} style={{ color: 'var(--color-warning)' }} />
@@ -834,11 +935,20 @@ export default function SniperDashboard({ apiBase }) {
               </div>
             </div>
           </div>
-        </div>
+        </LiquidGlass>
       </div>
 
       {/* 5. Pending Orders & History Trades Table */}
-      <div className="sniper-panel" style={{ padding: 0, overflow: 'hidden' }}>
+      <LiquidGlass
+        className="sniper-panel liquid-panel"
+        displacementScale={25}
+        blurAmount={0.06}
+        saturation={135}
+        aberrationIntensity={1.5}
+        cornerRadius={12}
+        padding="0"
+        style={{ overflow: 'hidden' }}
+      >
         <div style={{ padding: '1rem 1.25rem', borderBottom: '1px solid var(--border-color)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontWeight: '600' }}>
             <Target size={18} style={{ color: 'var(--color-wait)' }} />
@@ -859,11 +969,10 @@ export default function SniperDashboard({ apiBase }) {
                 style={{
                   padding: '4px 10px',
                   borderRadius: '6px',
-                  border: 'none',
                   fontSize: '0.72rem',
                   fontWeight: 600,
                   cursor: 'pointer',
-                  transition: 'all 0.2s',
+                  transition: 'background 0.2s, color 0.2s, border-color 0.2s',
                   background: historyFilter === tab.key ? 'rgba(175, 82, 222, 0.1)' : 'transparent',
                   color: historyFilter === tab.key ? '#8944ab' : 'var(--text-muted)',
                   border: historyFilter === tab.key ? '1px solid rgba(175, 82, 222, 0.25)' : '1px solid transparent',
@@ -928,9 +1037,9 @@ export default function SniperDashboard({ apiBase }) {
 
                         <td>
                           {t.status === 'pending' && <span className="badge-status pending">⏳ {isLong ? '等待挂单回踩' : '等待挂单冲高'}</span>}
-                          {t.status === 'closed_tp' && <span className="badge-status closed_tp">🎉 止盈平仓</span>}
-                          {t.status === 'closed_sl' && <span className="badge-status closed_sl">🛡️ 止损平仓</span>}
-                          {t.status === 'cancelled' && <span className="badge-status" style={{ background: 'rgba(0,0,0,0.05)', color: '#86868b' }}>⚪ 已撤单</span>}
+                          {t.status === 'closed_tp' && <span className="badge-status closed_tp" title={t.close_reason}>🎉 止盈平仓</span>}
+                          {t.status === 'closed_sl' && <span className="badge-status closed_sl" title={t.close_reason}>🛡️ 止损平仓</span>}
+                          {t.status === 'cancelled' && <span className="badge-status" style={{ background: 'rgba(0,0,0,0.05)', color: '#86868b' }} title={t.close_reason}>⚪ 已撤单</span>}
                         </td>
 
                         <td>
@@ -974,7 +1083,7 @@ export default function SniperDashboard({ apiBase }) {
             </div>
           );
         })()}
-      </div>
+      </LiquidGlass>
 
       {/* 5. Exchange & Sniper Settings Modal */}
       {showConfigModal && (

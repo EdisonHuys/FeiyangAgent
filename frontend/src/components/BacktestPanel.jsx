@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { History, Play, Square, TrendingUp, Activity, ShieldAlert, Award, AlertCircle, Coins, Layers, ArrowUpRight, ArrowDownRight, RefreshCw, BarChart2, CheckCircle2, Clock, DollarSign, Filter } from 'lucide-react';
+import LiquidGlass from './LiquidGlass';
 
 export default function BacktestPanel({ apiBase, symbols = [] }) {
   const [form, setForm] = useState(() => {
@@ -209,14 +210,15 @@ export default function BacktestPanel({ apiBase, symbols = [] }) {
   return (
     <div className="sniper-container" style={{ gap: '1.25rem' }}>
       {/* 1. Header Banner */}
-      <div className="sniper-header" style={{
-        background: 'var(--glass-bg)',
-        border: '1px solid var(--glass-border)',
-        borderRadius: '12px',
-        padding: '1.25rem 1.5rem',
-        boxShadow: 'var(--glass-shadow)',
-        backdropFilter: 'blur(30px)'
-      }}>
+      <LiquidGlass
+        className="sniper-header liquid-panel"
+        displacementScale={20}
+        blurAmount={0.06}
+        saturation={130}
+        aberrationIntensity={1}
+        cornerRadius={12}
+        padding="1rem"
+      >
         <div className="sniper-header-left">
           <div className="sniper-icon-badge" style={{
             background: 'rgba(0, 122, 255, 0.08)',
@@ -237,7 +239,7 @@ export default function BacktestPanel({ apiBase, symbols = [] }) {
             </p>
           </div>
         </div>
-      </div>
+      </LiquidGlass>
 
       {/* 2. Notice Callout */}
       <div style={{
@@ -259,7 +261,15 @@ export default function BacktestPanel({ apiBase, symbols = [] }) {
       </div>
 
       {/* 3. Parameter Controls Form Panel */}
-      <div className="panel" style={{ padding: '1.25rem' }}>
+      <LiquidGlass
+        className="panel liquid-panel"
+        displacementScale={30}
+        blurAmount={0.0625}
+        saturation={140}
+        aberrationIntensity={2}
+        cornerRadius={12}
+        padding="1rem"
+      >
         <div style={{ fontSize: '0.92rem', fontWeight: 700, color: 'var(--text-bright)', marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
           <Filter size={16} style={{ color: '#007aff' }} />
           <span>回测实验室参数配置</span>
@@ -412,17 +422,25 @@ export default function BacktestPanel({ apiBase, symbols = [] }) {
             ❌ {error}
           </div>
         )}
-      </div>
+      </LiquidGlass>
 
       {/* 4. Results Dashboard Card */}
       {result && (
         <>
           <div className="sniper-grid">
             {/* Net Profit */}
-            <div className="sniper-card" style={{
-              background: 'rgba(255, 255, 255, 0.55)',
-              border: `1px solid ${result.net_profit_usd >= 0 ? 'rgba(52, 199, 89, 0.25)' : 'rgba(255, 59, 48, 0.25)'}`
-            }}>
+            <LiquidGlass
+              className="sniper-card liquid-panel"
+              displacementScale={15}
+              blurAmount={0.05}
+              saturation={130}
+              aberrationIntensity={1}
+              cornerRadius={10}
+              padding="1rem"
+              style={{
+                border: `1px solid ${result.net_profit_usd >= 0 ? 'rgba(52, 199, 89, 0.25)' : 'rgba(255, 59, 48, 0.25)'}`
+              }}
+            >
               <div className="sniper-card-header">
                 <span>回测净收益</span>
                 <TrendingUp size={18} style={{ color: result.net_profit_usd >= 0 ? '#248a3d' : '#d70015' }} />
@@ -434,13 +452,21 @@ export default function BacktestPanel({ apiBase, symbols = [] }) {
               <div className="sniper-card-sub">
                 期末账户总余额: <strong style={{ color: 'var(--text-bright)' }}>${result.final_balance} USD</strong>
               </div>
-            </div>
+            </LiquidGlass>
 
             {/* Win Rate & Profit Factor */}
-            <div className="sniper-card" style={{
-              background: 'rgba(255, 255, 255, 0.55)',
-              border: '1px solid rgba(255, 149, 0, 0.25)'
-            }}>
+            <LiquidGlass
+              className="sniper-card liquid-panel"
+              displacementScale={15}
+              blurAmount={0.05}
+              saturation={130}
+              aberrationIntensity={1}
+              cornerRadius={10}
+              padding="1rem"
+              style={{
+                border: '1px solid rgba(255, 149, 0, 0.25)'
+              }}
+            >
               <div className="sniper-card-header">
                 <span>交易胜率 / 盈亏比 (PF)</span>
                 <Award size={18} style={{ color: '#b25000' }} />
@@ -452,13 +478,21 @@ export default function BacktestPanel({ apiBase, symbols = [] }) {
               <div className="sniper-card-sub">
                 {result.winning_trades_count} 胜 / {result.losing_trades_count} 负 (共计 {result.total_trades_count} 单)
               </div>
-            </div>
+            </LiquidGlass>
 
             {/* Max Drawdown */}
-            <div className="sniper-card" style={{
-              background: 'rgba(255, 255, 255, 0.55)',
-              border: '1px solid rgba(255, 59, 48, 0.25)'
-            }}>
+            <LiquidGlass
+              className="sniper-card liquid-panel"
+              displacementScale={15}
+              blurAmount={0.05}
+              saturation={130}
+              aberrationIntensity={1}
+              cornerRadius={10}
+              padding="1rem"
+              style={{
+                border: '1px solid rgba(255, 59, 48, 0.25)'
+              }}
+            >
               <div className="sniper-card-header">
                 <span>最大回撤 (Max DD)</span>
                 <Activity size={18} style={{ color: '#d70015' }} />
@@ -469,13 +503,21 @@ export default function BacktestPanel({ apiBase, symbols = [] }) {
               <div className="sniper-card-sub">
                 历史最大回撤金额: <strong style={{ color: 'var(--text-bright)' }}>-${result.max_drawdown_usd} USD</strong>
               </div>
-            </div>
+            </LiquidGlass>
 
             {/* Cost & LLM Usage */}
-            <div className="sniper-card" style={{
-              background: 'rgba(255, 255, 255, 0.55)',
-              border: '1px solid rgba(175, 82, 222, 0.25)'
-            }}>
+            <LiquidGlass
+              className="sniper-card liquid-panel"
+              displacementScale={15}
+              blurAmount={0.05}
+              saturation={130}
+              aberrationIntensity={1}
+              cornerRadius={10}
+              padding="1rem"
+              style={{
+                border: '1px solid rgba(175, 82, 222, 0.25)'
+              }}
+            >
               <div className="sniper-card-header">
                 <span>交易手续费与 LLM 消耗</span>
                 <Coins size={18} style={{ color: '#8944ab' }} />
@@ -487,11 +529,19 @@ export default function BacktestPanel({ apiBase, symbols = [] }) {
                 LLM 诊察点: <strong style={{ color: 'var(--text-bright)' }}>{result.llm_calls_used} 次</strong>
                 {result.llm_budget_exhausted ? ' (上限拦截已触及)' : ''}
               </div>
-            </div>
+            </LiquidGlass>
           </div>
 
           {/* Equity curve chart card */}
-          <div className="panel" style={{ padding: '1.25rem' }}>
+          <LiquidGlass
+            className="panel liquid-panel"
+            displacementScale={25}
+            blurAmount={0.06}
+            saturation={135}
+            aberrationIntensity={1.5}
+            cornerRadius={12}
+            padding="1rem"
+          >
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.8rem' }}>
               <div style={{ fontSize: '0.92rem', fontWeight: 700, color: 'var(--text-bright)', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                 <BarChart2 size={16} style={{ color: '#248a3d' }} />
@@ -502,10 +552,19 @@ export default function BacktestPanel({ apiBase, symbols = [] }) {
             <div style={{ background: 'rgba(255, 255, 255, 0.5)', borderRadius: '8px', padding: '0.5rem', border: '1px solid var(--border-color)' }}>
               <canvas ref={canvasRef} style={{ width: '100%', height: '180px' }}></canvas>
             </div>
-          </div>
+          </LiquidGlass>
 
           {/* Trade Executions Table */}
-          <div className="panel" style={{ padding: 0, overflow: 'hidden' }}>
+          <LiquidGlass
+            className="panel liquid-panel"
+            displacementScale={25}
+            blurAmount={0.06}
+            saturation={135}
+            aberrationIntensity={1.5}
+            cornerRadius={12}
+            padding="0"
+            style={{ overflow: 'hidden' }}
+          >
             <div style={{ padding: '1rem 1.25rem', borderBottom: '1px solid var(--border-color)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: 'rgba(255, 255, 255, 0.5)' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                 <Layers size={16} style={{ color: '#007aff' }} />
@@ -575,7 +634,7 @@ export default function BacktestPanel({ apiBase, symbols = [] }) {
                 </tbody>
               </table>
             </div>
-          </div>
+          </LiquidGlass>
 
           {/* Simulation Notes */}
           <div style={{ padding: '0.85rem 1.25rem', borderRadius: '10px', background: 'rgba(255, 255, 255, 0.5)', border: '1px solid var(--border-color)', fontSize: '0.78rem', color: 'var(--text-muted)', lineHeight: '1.6' }}>

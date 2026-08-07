@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Activity, TrendingUp, Calendar, Newspaper, AlertTriangle, RefreshCw, ChevronDown, ChevronUp } from 'lucide-react';
+import LiquidGlass from './LiquidGlass';
 
 export default function SentimentPanel({ apiBase }) {
   const [data, setData] = useState(null);
@@ -54,25 +55,23 @@ export default function SentimentPanel({ apiBase }) {
 
   if (loading && !data) {
     return (
-      <div className="panel" style={{
+      <LiquidGlass className="panel liquid-panel" style={{
         padding: '1.5rem',
-        marginBottom: '1rem',
         flexShrink: 0,
         textAlign: 'center',
         color: 'var(--text-muted)',
         fontSize: '0.82rem'
       }}>
         正在加载市场情绪数据...
-      </div>
+      </LiquidGlass>
     );
   }
 
   const risk = getRiskStyle(data?.risk_level || 'normal');
 
   return (
-    <div className="panel" style={{
-      padding: '1rem 1.25rem',
-      marginBottom: '1rem',
+    <LiquidGlass className="panel liquid-panel" style={{
+      padding: '1rem',
       flexShrink: 0
     }}>
       {/* Header */}
@@ -227,6 +226,6 @@ export default function SentimentPanel({ apiBase }) {
         </div>
       </div>
     )}
-  </div>
+  </LiquidGlass>
   );
 }

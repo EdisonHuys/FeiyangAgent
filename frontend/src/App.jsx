@@ -6,6 +6,7 @@ import SniperDashboard from './components/SniperDashboard';
 import BacktestPanel from './components/BacktestPanel';
 import PromptEditorPanel from './components/PromptEditorPanel';
 import SentimentPanel from './components/SentimentPanel';
+import LiquidGlass from './components/LiquidGlass';
 
 const API_BASE = window.location.origin.includes('5173') ? 'http://127.0.0.1:8000' : window.location.origin;
 
@@ -491,7 +492,15 @@ export default function App() {
       </div>
 
       {/* Navbar */}
-      <header className="navbar">
+      <LiquidGlass
+        className="navbar liquid-navbar"
+        displacementScale={30}
+        blurAmount={0.0625}
+        saturation={140}
+        aberrationIntensity={2}
+        cornerRadius={28}
+        padding="0.6rem 1.5rem"
+      >
         <div className="brand-section">
           <TrendingUp size={24} style={{ color: 'var(--color-long)' }} />
           <h1 className="brand-logo">Feiyang.AI</h1>
@@ -510,7 +519,7 @@ export default function App() {
             className={`btn btn-secondary ${activeTab === 'sniper' ? 'active' : ''}`}
             onClick={() => setActiveTab('sniper')}
           >
-            <Target size={16} className="text-cyan-400" />
+            <Target size={16} style={{ color: '#22d3ee' }} />
             <span>🎯 智能狙击控制台</span>
           </button>
           <button
@@ -535,24 +544,24 @@ export default function App() {
             <span>核心配置参数</span>
           </button>
         </div>
-      </header>
+      </LiquidGlass>
 
       {/* Main Container */}
       <main style={{ flex: 1, minHeight: 0 }}>
         {activeTab === 'prompt' ? (
-          <div style={{ padding: '1.5rem', height: '100%', overflowY: 'auto' }}>
+          <div style={{ padding: '0.75rem 1rem 1rem', height: '100%', overflowY: 'auto' }}>
             <PromptEditorPanel apiBase={API_BASE} standalone={true} />
           </div>
         ) : activeTab === 'settings' ? (
-          <div style={{ padding: '1.5rem', height: '100%' }}>
+          <div style={{ padding: '0.75rem 1rem 1rem', height: '100%' }}>
             <SettingsPanel apiBase={API_BASE} />
           </div>
         ) : activeTab === 'sniper' ? (
-          <div style={{ padding: '1.5rem', height: '100%', overflowY: 'auto' }}>
+          <div style={{ padding: '0.75rem 1rem 1rem', height: '100%', overflowY: 'auto' }}>
             <SniperDashboard apiBase={API_BASE} />
           </div>
         ) : activeTab === 'backtest' ? (
-          <div style={{ padding: '1.5rem', height: '100%', overflowY: 'auto' }}>
+          <div style={{ padding: '0.75rem 1rem 1rem', height: '100%', overflowY: 'auto' }}>
             <BacktestPanel apiBase={API_BASE} symbols={symbolsList} />
           </div>
         ) : (
@@ -560,7 +569,15 @@ export default function App() {
             
             {/* Left Side: Chart and Timeframe */}
             <section className="column-left">
-              <div className="panel chart-panel">
+              <LiquidGlass
+                className="panel chart-panel liquid-panel"
+                displacementScale={40}
+                blurAmount={0.0625}
+                saturation={140}
+                aberrationIntensity={2}
+                cornerRadius={12}
+                padding="1rem"
+              >
                 <div className="panel-header">
                   <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
                     <div className="panel-title">
@@ -583,7 +600,8 @@ export default function App() {
                   <div className="timeframe-selector">
                     {['1h', '4h', '1D', '1W', '1M'].map(tf => (
                       <button 
-                        key={tf} 
+                        key={tf 
+                        } 
                         className={`btn btn-secondary ${selectedTimeframe === tf ? 'active' : ''}`}
                         style={{ padding: '0.3rem 0.75rem', fontSize: '0.8rem' }}
                         onClick={() => setSelectedTimeframe(tf)}
@@ -614,13 +632,12 @@ export default function App() {
                 <div 
                   className="monitor-logs-panel"
                   style={{
-                    borderTop: '1px solid rgba(0,0,0,0.06)',
-                    paddingTop: '0.75rem',
-                    marginTop: '0.75rem',
-                    height: '160px',
+                    borderTop: '1px solid rgba(255,255,255,0.06)',
+                    paddingTop: '0.6rem',
+                    marginTop: '0.6rem',
+                    height: '120px',
                     display: 'flex',
                     flexDirection: 'column',
-                    minHeight: '160px',
                     position: 'relative'
                   }}
                 >
@@ -732,13 +749,22 @@ export default function App() {
                     </button>
                   )}
                 </div>
-              </div>
+              </LiquidGlass>
             </section>
 
             {/* Right Side: Prediction & Feiyang Console */}
             <section className="column-right">
               {/* Diagnose Trigger Panel */}
-              <div className="panel" style={{ flexShrink: 0 }}>
+              <LiquidGlass
+                className="panel liquid-panel"
+                displacementScale={30}
+                blurAmount={0.0625}
+                saturation={140}
+                aberrationIntensity={2}
+                cornerRadius={12}
+                padding="1rem"
+                style={{ flexShrink: 0 }}
+              >
                 <div className="panel-header" style={{ marginBottom: '0.5rem', borderBottom: 'none', paddingBottom: 0, display: 'flex', justifyContent: 'space-between', alignItems: 'center', lineHeight: 'normal' }}>
                   <div className="panel-title" style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', lineHeight: 'normal' }}>
                     <span style={{ fontSize: '1.1rem', display: 'inline-flex', alignItems: 'center' }}>💡</span>
@@ -776,13 +802,22 @@ export default function App() {
                     </>
                   )}
                 </button>
-              </div>
+              </LiquidGlass>
 
               {/* Market Sentiment Panel */}
               <SentimentPanel apiBase={API_BASE} />
 
               {/* Diagnostic outputs */}
-              <div className="panel" style={{ flex: 1, minHeight: '350px', overflow: 'hidden' }}>
+              <LiquidGlass
+                className="panel liquid-panel"
+                displacementScale={30}
+                blurAmount={0.0625}
+                saturation={140}
+                aberrationIntensity={2}
+                cornerRadius={12}
+                padding="1rem"
+                style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}
+              >
                 <div className="panel-header">
                   <div className="panel-title">
                     <span>📊 诊断结果与警报</span>
@@ -877,7 +912,7 @@ export default function App() {
                     </span>
                   </div>
                 )}
-              </div>
+              </LiquidGlass>
             </section>
 
           </div>

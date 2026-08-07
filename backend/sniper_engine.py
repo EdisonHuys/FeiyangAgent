@@ -1478,63 +1478,129 @@ class SniperEngine:
             logger.warning(f"[LiveSniper] Balance sync warning: {e}")
         return self.state.get("config", {}).get("live_account_balance", 10.0)
 
-    def _execute_live_market_close(self, symbol, side, amount, reason=""):
+    def _execute_live_market_close(self, symbol, side, amount, reason="", expected_entry=None):
         """
         Dual Insurance: Fallback active market close order to force-close live positions!
         Dual-mode support (One-Way and Hedge Mode).
+        Safeguard: Verifies exchange position entry price against expected_entry to prevent
+        accidentally closing a newly opened position on the same symbol!
         """
+        import time
+        if hasattr(self, "_binance_rate_limit_until") and self._binance_rate_limit_until > time.time():
+            logger.debug(f"[LiveSniper] {symbol} 平仓跳过: IP 限流冷却中")
+            return None
         try:
             exchange, ex_id = self._init_live_ccxt()
             ccxt_symbol = f"{symbol}:USDT" if ":" not in symbol else symbol
             close_side = "sell" if side.lower() in ["long", "buy"] else "buy"
             pos_side = "LONG" if side.lower() in ["long", "buy"] else "SHORT"
             
+            # 🛡️ Precision Safety & New Position Verification
+            is_hedge_mode = True
+            try:
+                positions = exchange.fetch_positions([ccxt_symbol])
+                matched_pos = None
+                raw_sym_target = ccxt_symbol.replace("/", "").replace(":USDT", "USDT")
+                for p in positions:
+                    p_contracts = float(p.get("contracts", 0) or 0)
+                    p_side = str(p.get("side", "")).upper()
+                    p_info_side = str(p.get("info", {}).get("positionSide", "BOTH")).upper()
+                    p_sym = p.get("symbol", "")
+                    p_raw_sym = str(p.get("info", {}).get("symbol", ""))
+                    
+                    sym_match = (p_sym == ccxt_symbol or p_sym == symbol or p_raw_sym == raw_sym_target)
+                    if sym_match and p_contracts > 0:
+                        if p_info_side == pos_side or p_side == pos_side or p_info_side == "BOTH":
+                            matched_pos = p
+                            if p_info_side == "BOTH":
+                                is_hedge_mode = False
+                            elif p_info_side in ["LONG", "SHORT"]:
+                                pos_side = p_info_side
+                            break
+
+                if not matched_pos:
+                    logger.info(f"[LiveSniper] ℹ️ 交易所当前无 {symbol} ({side.upper()}) 活跃持仓，无需下单，标记已结清")
+                    return "already_closed"
+
+                # Safeguard: prevent closing a newly opened position
+                if expected_entry:
+                    ex_entry = float(matched_pos.get("entryPrice", 0) or 0)
+                    if ex_entry > 0 and abs(ex_entry - float(expected_entry)) / float(expected_entry) > 0.05:
+                        logger.warning(f"[LiveSniper] 🚨 防误伤机制触发! {symbol} 交易所均价 {ex_entry} 偏离预期 {expected_entry} 超过 5%，拒绝平仓")
+                        return None
+
+                ex_contracts = float(matched_pos.get("contracts", 0) or 0)
+                if ex_contracts > 0:
+                    amount = ex_contracts
+                    logger.info(f"[LiveSniper] 🎯 强制使用交易所实际持仓精准数量平仓: amount={amount}")
+
+            except Exception as ver_err:
+                logger.debug(f"[LiveSniper] 仓位防误伤校验跳过: {ver_err}")
+
             try:
                 amount = float(exchange.amount_to_precision(ccxt_symbol, amount))
             except Exception:
                 pass
 
-            # Safety: if precision truncation killed the amount, fetch real position size
+            # Safety: if precision truncation killed the amount, use raw amount
             market = exchange.market(ccxt_symbol)
             min_amount = (market.get("limits") or {}).get("amount", {}).get("min", 0) or 0
             if amount < min_amount:
-                try:
-                    positions = exchange.fetch_positions([ccxt_symbol])
-                    for p in positions:
-                        if p.get("symbol") == ccxt_symbol and float(p.get("contracts", 0) or 0) > 0:
-                            amount = float(p["contracts"])
-                            logger.info(f"[LiveSniper] 使用交易所实际仓位量替代: {amount}")
-                            break
-                except Exception:
-                    pass
-                if amount < min_amount:
-                    logger.error(f"[LiveSniper] ❌ {symbol} 平仓量 {amount} < 最小量 {min_amount}，无法下单")
-                    return None
+                logger.error(f"[LiveSniper] ❌ {symbol} 平仓量 {amount} < 最小量 {min_amount}，无法下单")
+                return None
 
             logger.info(f"[LiveSniper] 🛡️ [双保险防守触发] 向 {ex_id.upper()} 下发紧急市价平仓单: {ccxt_symbol} {close_side.upper()} amount={amount} ({reason})")
             
-            # Attempt 1: Try with Hedge Mode positionSide parameter
+            # Cancel all existing conditional orders first!
+            # If we don't, existing reduceOnly/closePosition orders will tie up the available position size,
+            # causing our reduceOnly market order to be rejected with "-2022 ReduceOnly Order is rejected".
+            if ex_id == "binance":
+                try:
+                    self._binance_force_cancel_all_orders(exchange, ccxt_symbol)
+                except Exception as c_err:
+                    logger.debug(f"[LiveSniper] Cancel orders before close skipped: {c_err}")
+            
+            # Attempt 1: Try with reduceOnly
             try:
+                params_1 = {"reduceOnly": True}
+                if is_hedge_mode:
+                    params_1["positionSide"] = pos_side
                 res = exchange.create_order(
                     symbol=ccxt_symbol,
                     type="market",
                     side=close_side,
                     amount=amount,
-                    params={"reduceOnly": True, "positionSide": pos_side}
+                    params=params_1
                 )
                 return str(res.get("id"))
             except Exception as hedge_e:
-                logger.warning(f"[LiveSniper] Hedge mode close attempt failed ({hedge_e}), retrying with One-Way mode params...")
-                # Attempt 2: Fallback to standard One-Way mode reduceOnly parameter
-                res = exchange.create_order(
-                    symbol=ccxt_symbol,
-                    type="market",
-                    side=close_side,
-                    amount=amount,
-                    params={"reduceOnly": True}
-                )
-                return str(res.get("id"))
+                logger.warning(f"[LiveSniper] Attempt 1 (reduceOnly) failed ({hedge_e}), retrying without reduceOnly...")
+                try:
+                    # Attempt 2: Fallback without reduceOnly (in case of dust or precision issues tying up position)
+                    params_2 = {}
+                    if is_hedge_mode:
+                        params_2["positionSide"] = pos_side
+                    res = exchange.create_order(
+                        symbol=ccxt_symbol,
+                        type="market",
+                        side=close_side,
+                        amount=amount,
+                        params=params_2
+                    )
+                    return str(res.get("id"))
+                except Exception as oneway_e:
+                    logger.error(f"[LiveSniper] Final market close attempt failed: {oneway_e}")
+                    raise oneway_e
         except Exception as e:
+            err_str = str(e)
+            if "418" in err_str or "-1003" in err_str or "too many requests" in err_str.lower():
+                import re as _re
+                import time
+                ban_match = _re.search(r"banned until (\d+)", err_str)
+                if ban_match:
+                    self._binance_rate_limit_until = int(ban_match.group(1)) / 1000.0
+                else:
+                    self._binance_rate_limit_until = time.time() + 120
             logger.error(f"[LiveSniper] ❌ 双保险紧急市价平仓失败 ({symbol}): {e}")
             return None
 
