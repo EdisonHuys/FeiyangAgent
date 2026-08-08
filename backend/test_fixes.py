@@ -1980,7 +1980,13 @@ class TestExchangeSLUpdateRetry:
                           amount=0.08, lev=50, margin=0.8, is_live=True)
         trade["protective_sl_order_id"] = "existing"
 
-        with patch.object(paper_engine, '_init_live_ccxt', return_value=(MagicMock(), "binance")):
+        mock_exchange = MagicMock()
+        mock_exchange.fetch_positions.return_value = [
+            {"symbol": "BTC/USDT:USDT", "contracts": 0.08, "side": "long",
+             "info": {"positionSide": "LONG", "symbol": "BTCUSDT"}}
+        ]
+
+        with patch.object(paper_engine, '_init_live_ccxt', return_value=(mock_exchange, "binance")):
             with patch.object(paper_engine, '_binance_force_cancel_all_orders', return_value=2):
                 with patch.object(paper_engine, '_place_live_protective_sl', return_value="new_123"):
                     with patch('time.sleep'):
@@ -1995,6 +2001,10 @@ class TestExchangeSLUpdateRetry:
         trade["protective_sl_order_id"] = "existing"
 
         mock_exchange = MagicMock()
+        mock_exchange.fetch_positions.return_value = [
+            {"symbol": "BTC/USDT:USDT", "contracts": 0.08, "side": "long",
+             "info": {"positionSide": "LONG", "symbol": "BTCUSDT"}}
+        ]
         place_results = ["existing", "new_order_123"]
 
         with patch.object(paper_engine, '_init_live_ccxt', return_value=(mock_exchange, "binance")):
@@ -2015,6 +2025,10 @@ class TestExchangeSLUpdateRetry:
         trade["protective_sl_order_id"] = "existing"
 
         mock_exchange = MagicMock()
+        mock_exchange.fetch_positions.return_value = [
+            {"symbol": "BTC/USDT:USDT", "contracts": 0.08, "side": "long",
+             "info": {"positionSide": "LONG", "symbol": "BTCUSDT"}}
+        ]
 
         with patch.object(paper_engine, '_init_live_ccxt', return_value=(mock_exchange, "binance")):
             with patch.object(paper_engine, '_binance_force_cancel_all_orders', return_value=2):
@@ -2047,6 +2061,70 @@ class TestExchangeSLUpdateRetry:
             paper_engine._update_live_sl_order_on_exchange(trade, "long", 0.0, 495.0)
 
         mock_init.assert_not_called()
+
+    def test_skips_when_no_position_on_exchange(self, paper_engine):
+        """Should skip SL update if exchange has no open position (prevents -4509)."""
+        trade = make_trade(status="filled", sig_type="long", entry=500, sl=490, tps=[520],
+                          amount=0.08, lev=50, margin=0.8, is_live=True)
+        trade["protective_sl_order_id"] = "old_123"
+
+        mock_exchange = MagicMock()
+        # Return empty positions — position has been closed on exchange
+        mock_exchange.fetch_positions.return_value = []
+
+        with patch.object(paper_engine, '_init_live_ccxt', return_value=(mock_exchange, "binance")):
+            with patch.object(paper_engine, '_binance_force_cancel_all_orders') as mock_cancel:
+                with patch.object(paper_engine, '_place_live_protective_sl') as mock_place:
+                    with patch('time.sleep'):
+                        paper_engine._update_live_sl_order_on_exchange(trade, "long", 0.08, 495.0)
+
+        # Should NOT have cancelled orders or placed new ones
+        mock_cancel.assert_not_called()
+        mock_place.assert_not_called()
+        assert trade["protective_sl_order_id"] is None
+
+    def test_no_position_return_stops_retry(self, paper_engine):
+        """When _place_live_protective_sl returns 'no_position', stop retrying immediately."""
+        trade = make_trade(status="filled", sig_type="long", entry=500, sl=490, tps=[520],
+                          amount=0.08, lev=50, margin=0.8, is_live=True)
+        trade["protective_sl_order_id"] = "existing"
+
+        mock_exchange = MagicMock()
+        mock_exchange.fetch_positions.return_value = [
+            {"symbol": "BTC/USDT:USDT", "contracts": 0.08, "side": "long",
+             "info": {"positionSide": "LONG", "symbol": "BTCUSDT"}}
+        ]
+
+        with patch.object(paper_engine, '_init_live_ccxt', return_value=(mock_exchange, "binance")):
+            with patch.object(paper_engine, '_binance_force_cancel_all_orders', return_value=2):
+                with patch.object(paper_engine, '_place_live_protective_sl', return_value="no_position") as mock_place:
+                    with patch.object(paper_engine, '_send_notification') as mock_notify:
+                        with patch('time.sleep'):
+                            paper_engine._update_live_sl_order_on_exchange(
+                                trade, "long", 0.08, 495.0
+                            )
+
+        # Should only be called once (no retry for no_position)
+        assert mock_place.call_count == 1
+        # Should NOT send alarming notification
+        mock_notify.assert_not_called()
+        # Should clear the order ID
+        assert trade["protective_sl_order_id"] is None
+
+    def test_place_sl_handles_4509_gracefully(self, paper_engine):
+        """_place_live_protective_sl should return 'no_position' for -4509 error, not notify."""
+        mock_exchange = MagicMock()
+        mock_exchange.create_order.side_effect = Exception(
+            '{"code":-4509,"msg":"Time in Force (TIF) GTE can only be used with open positions."}'
+        )
+
+        with patch.object(paper_engine, '_send_notification') as mock_notify:
+            result = paper_engine._place_live_protective_sl(
+                mock_exchange, "binance", "BNB/USDT", "short", 1.5, 609.58
+            )
+
+        assert result == "no_position"
+        mock_notify.assert_not_called()
 
 
 # ═══════════════════════════════════════════════════════════════

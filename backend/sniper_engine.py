@@ -385,6 +385,14 @@ class SniperEngine:
             if "-4130" in err_str or "closePosition in the direction is existing" in err_str:
                 logger.info(f"[LiveSniper] ℹ️ {symbol} 交易所侧已存在止损单，跳过重复挂设（仓位已受保护）")
                 return "existing"
+            # -4509: TIF GTE can only be used with open positions.
+            # The position has been closed on the exchange — no point retrying or alarming.
+            if "-4509" in err_str or "open positions" in err_str.lower():
+                logger.warning(
+                    f"[LiveSniper] ℹ️ {symbol} 交易所侧无持仓，跳过止损单挂设"
+                    f"（仓位可能已被平仓或同步延迟）"
+                )
+                return "no_position"
             logger.error(f"[LiveSniper] ❌ 交易所侧止损保护单挂设失败 ({symbol}): {e}")
             self._send_notification(
                 f"⚠️ 实盘止损保护单挂设失败：{symbol}",
@@ -532,6 +540,36 @@ class SniperEngine:
             symbol = t["symbol"]
             ccxt_symbol = f"{symbol}:USDT" if ":" not in symbol else symbol
 
+            # ── Pre-flight: verify the position still exists on the exchange ──
+            # This prevents -4509 errors and unnecessary order churn when the
+            # position has already been closed (manually, by SL trigger, etc.)
+            try:
+                positions = exchange.fetch_positions([ccxt_symbol])
+                pos_side = "LONG" if sig_type == "long" else "SHORT"
+                raw_sym_target = ccxt_symbol.replace("/", "").replace(":USDT", "USDT")
+                has_position = False
+                for p in positions:
+                    p_contracts = float(p.get("contracts", 0) or 0)
+                    p_info_side = str(p.get("info", {}).get("positionSide", "BOTH")).upper()
+                    p_sym = p.get("symbol", "")
+                    p_raw_sym = str(p.get("info", {}).get("symbol", ""))
+                    sym_match = (p_sym == ccxt_symbol or p_sym == symbol or p_raw_sym == raw_sym_target)
+                    if sym_match and p_contracts > 0:
+                        if p_info_side == pos_side or p_info_side == "BOTH":
+                            has_position = True
+                            break
+                if not has_position:
+                    logger.warning(
+                        f"[TrailingStop] ⏭️ {symbol} 交易所侧无 {pos_side} 持仓，"
+                        f"跳过止损单更新（仓位可能已被平仓）"
+                    )
+                    t["protective_sl_order_id"] = None
+                    return
+            except Exception as pos_check_err:
+                # If position check fails (e.g. API rate limit), proceed anyway —
+                # the _place_live_protective_sl will handle -4509 gracefully.
+                logger.debug(f"[TrailingStop] {symbol} 仓位预检失败，继续尝试: {pos_check_err}")
+
             # ── Cancel ALL orders (regular + algo) for this symbol ──
             if ex_id == "binance":
                 cancel_result = self._binance_force_cancel_all_orders(exchange, ccxt_symbol)
@@ -547,7 +585,7 @@ class SniperEngine:
                     logger.warning(f"[TrailingStop] {symbol} 撤销挂单失败: {e}")
 
             old_order_id = t.get("protective_sl_order_id")
-            if old_order_id and old_order_id not in ("existing", None):
+            if old_order_id and old_order_id not in ("existing", None, "no_position"):
                 try:
                     exchange.cancel_order(old_order_id, ccxt_symbol)
                 except Exception:
@@ -561,9 +599,18 @@ class SniperEngine:
 
                 new_order_id = self._place_live_protective_sl(exchange, ex_id, symbol, sig_type, amount, new_sl)
 
-                if new_order_id and new_order_id != "existing":
+                if new_order_id and new_order_id not in ("existing", "no_position"):
                     t["protective_sl_order_id"] = new_order_id
                     logger.info(f"[TrailingStop] ✅ {symbol} 交易所侧止损单已更新至 ${new_sl} (#{new_order_id})")
+                    return
+
+                # Position no longer exists on exchange — stop retrying immediately
+                if new_order_id == "no_position":
+                    logger.warning(
+                        f"[TrailingStop] ⏭️ {symbol} 交易所侧无持仓，停止重试"
+                        f"（仓位可能已被平仓或同步延迟）"
+                    )
+                    t["protective_sl_order_id"] = None
                     return
 
                 if new_order_id == "existing":
@@ -1199,7 +1246,7 @@ class SniperEngine:
                                         sl_exchange, sl_ex_id, symbol, side,
                                         filled_amount, t["stop_loss"]
                                     )
-                                    if prot_id:
+                                    if prot_id and prot_id not in ("no_position",):
                                         t["protective_sl_order_id"] = prot_id
                                 except Exception as prot_e:
                                     logger.warning(
@@ -1359,7 +1406,7 @@ class SniperEngine:
                                     sl_exchange, sl_ex_id, symbol, side,
                                     filled_amount, auto_sl
                                 )
-                                if prot_id:
+                                if prot_id and prot_id not in ("no_position",):
                                     adopted_trade["protective_sl_order_id"] = prot_id
                             except Exception as prot_e:
                                 logger.warning(
@@ -2447,7 +2494,7 @@ class SniperEngine:
                                     sl_exchange, sl_ex_id, t["symbol"], t["signal_type"].lower(),
                                     filled_amount, t["stop_loss"]
                                 )
-                                if prot_id:
+                                if prot_id and prot_id not in ("no_position",):
                                     t["protective_sl_order_id"] = prot_id
                             except Exception as prot_e:
                                 logger.warning(
@@ -2546,7 +2593,7 @@ class SniperEngine:
                             except Exception:
                                 filled_amount = round(pos_val / t["actual_entry"], 4)
                             prot_id = self._place_live_protective_sl(exchange, ex_id, symbol, sig_type, filled_amount, sl)
-                            if prot_id:
+                            if prot_id and prot_id not in ("no_position",):
                                 t["protective_sl_order_id"] = prot_id
 
                         # Dispatch Filled Notification
@@ -2570,7 +2617,7 @@ class SniperEngine:
                             
                             if not t.get("protective_sl_order_id"):
                                 prot_id = self._place_live_protective_sl(exchange, ex_id, symbol, sig_type, filled_amt, sl)
-                                if prot_id:
+                                if prot_id and prot_id not in ("no_position",):
                                     t["protective_sl_order_id"] = prot_id
                                     
                             self._send_notification(
