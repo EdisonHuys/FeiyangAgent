@@ -15,6 +15,10 @@ ENV/
 build/
 dist/
 *.manifest
+.pyinstaller_cache/
+
+# TRAE generated share packages
+.trae-html-share-packages/
 
 # Node / Frontend Dependencies & Build Output
 node_modules/

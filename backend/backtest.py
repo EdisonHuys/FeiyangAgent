@@ -336,6 +336,7 @@ class BacktestRunner:
         """Mark residual open trades as closed at the final close for clean stats."""
         trades = engine.state.get("trades", [])
         changed = False
+        taker_fee, _, slippage = engine._fee_rates()
         for t in trades:
             if t.get("status") == "pending":
                 t["status"] = "cancelled"
@@ -347,11 +348,13 @@ class BacktestRunner:
                 lev = t["leverage"]
                 margin = t["margin_usd"]
                 rem = 0.5 if t.get("tp1_partial_closed") else 1.0
+                # Apply slippage to the exit price
                 if sig_type == "long":
-                    pct = (final_price - entry) / entry * lev
+                    exec_price = final_price * (1 - slippage)
+                    pct = (exec_price - entry) / entry * lev
                 else:
-                    pct = (entry - final_price) / entry * lev
-                taker_fee, _, _ = engine._fee_rates()
+                    exec_price = final_price * (1 + slippage)
+                    pct = (entry - exec_price) / entry * lev
                 fee = engine._record_fee(t, t["position_size_usd"] * rem, taker_fee)
                 leg_net = round(margin * rem * pct - fee, 2)
                 t["pnl_usd"] = round(t.get("pnl_usd", 0.0) + leg_net, 2)

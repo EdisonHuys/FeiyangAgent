@@ -275,6 +275,16 @@ def calculate_fibonacci_levels(df_1d, lookback=100):
     low = subset['low'].min()
     diff = high - low
 
+    # Guard against flat market (high == low): return swing levels with neutral midpoints
+    if diff <= 0:
+        mid = float(high)
+        return {
+            "swing_high": float(high),
+            "swing_low": float(low),
+            "upward_levels": {r: mid for r in ["0.382", "0.5", "0.618", "0.786", "1.272", "1.618", "2.618"]},
+            "downward_levels": {r: mid for r in ["0.382", "0.5", "0.618", "0.786", "1.272", "1.618", "2.618"]}
+        }
+
     levels = {
         "swing_high": float(high),
         "swing_low": float(low),
@@ -306,6 +316,15 @@ def calculate_4h_fibonacci(df_4h, lookback=120):
     high = subset['high'].max()
     low = subset['low'].min()
     diff = high - low
+
+    # Guard against flat market
+    if diff <= 0:
+        mid = float(high)
+        return {
+            "swing_high": float(high),
+            "swing_low": float(low),
+            "levels": {r: mid for r in ["0.236", "0.382", "0.5", "0.618", "0.786"]}
+        }
 
     return {
         "swing_high": float(high),

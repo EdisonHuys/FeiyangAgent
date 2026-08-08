@@ -39,6 +39,8 @@ class SniperEngine:
         self._last_positions_error = None
         self._live_balance_cache = None
         self._live_balance_cache_time = 0
+        self._live_balance_sync_fail_count = 0
+        self._live_balance_warned_disabled = False
         # Tombstone: symbols manually closed by user; excluded from position list for 90s
         # to avoid re-appearing due to exchange processing lag
         self._closed_external_symbols = {}  # {symbol: expiry_timestamp}
@@ -77,7 +79,9 @@ class SniperEngine:
                 # Pending orders older than this many hours are auto-cancelled
                 "pending_ttl_hours": 24.0,
                 # Perpetual funding fee charged on notional every 8 hours
-                "funding_rate_per_8h": 0.0001,
+                # Default 0.03%/8h ≈ 0.09%/day ≈ 27%/year (realistic for BTC perpetuals)
+                # In extreme markets (e.g. 0.75% cap), 9 epochs/72h = 6.75% notional erosion on 50x lev
+                "funding_rate_per_8h": 0.0003,
                 # Time-based stop: close positions held longer than this without TP1
                 "max_hold_hours": 72.0,
                 # Per-symbol volatility multipliers (higher = wider stops for volatile alts)
@@ -88,7 +92,9 @@ class SniperEngine:
                     "DOGE/USDT": 1.4,
                     "HYPE/USDT": 1.5,
                     "ZAMA/USDT": 1.6
-                }
+                },
+                # Per-trade max loss as % of margin before force-close
+                "max_trade_loss_percent": 50.0
             },
             "trades": []
         }
@@ -196,9 +202,16 @@ class SniperEngine:
         if daily.get(halted_key):
             return True
 
-        limit_pct = float(cfg.get("daily_max_loss_percent", 6.0))
+        limit_pct = float(cfg.get("daily_max_loss_percent", 5.0))
         start_bal = float(daily.get(bal_key) or 0.0)
         if start_bal <= 0 or limit_pct <= 0:
+            if mode == "live" and start_bal <= 0 and not self._live_balance_warned_disabled:
+                self._live_balance_warned_disabled = True
+                logger.warning(
+                    "[SniperEngine] Circuit breaker DISABLED in live mode: start_balance is 0 "
+                    "(live balance sync may have failed). Risk control is compromised — "
+                    "check API connectivity and live_account_balance config."
+                )
             return False
 
         day_pnl = self._current_balance() - start_bal
@@ -366,6 +379,12 @@ class SniperEngine:
             logger.info(f"[LiveSniper] 🛡️ 交易所侧止损保护单已挂设: {ccxt_symbol} trigger=${stop_loss} (#{order_id})")
             return order_id
         except Exception as e:
+            err_str = str(e)
+            # -4130: An open stop or take profit order already exists for this direction.
+            # This means the position IS already protected — not a failure.
+            if "-4130" in err_str or "closePosition in the direction is existing" in err_str:
+                logger.info(f"[LiveSniper] ℹ️ {symbol} 交易所侧已存在止损单，跳过重复挂设（仓位已受保护）")
+                return "existing"
             logger.error(f"[LiveSniper] ❌ 交易所侧止损保护单挂设失败 ({symbol}): {e}")
             self._send_notification(
                 f"⚠️ 实盘止损保护单挂设失败：{symbol}",
@@ -494,45 +513,95 @@ class SniperEngine:
         return True
 
     def _update_live_sl_order_on_exchange(self, t, sig_type, amount, new_sl):
-        """Helper to update exchange-side protective SL order cleanly."""
-        if t.get("is_live") and amount > 0:
-            try:
-                exchange, ex_id = self._init_live_ccxt()
-                symbol = t["symbol"]
-                ccxt_symbol = f"{symbol}:USDT" if ":" not in symbol else symbol
+        """
+        Helper to update exchange-side protective SL order cleanly.
+        Called by trailing-stop logic to push the new SL price to the exchange.
 
-                # 1. Cancel all existing trigger/stop orders on the exchange for this symbol
+        Binance moved STOP_MARKET closePosition orders to the Algo Order API.
+        The _binance_force_cancel_all_orders helper handles both regular and algo
+        order cancellation. After canceling, we place a fresh STOP_MARKET order.
+        """
+        if not (t.get("is_live") and amount > 0):
+            return
+
+        MAX_RETRIES = 3
+        RETRY_DELAYS = [0.5, 1.0, 2.0]
+
+        try:
+            exchange, ex_id = self._init_live_ccxt()
+            symbol = t["symbol"]
+            ccxt_symbol = f"{symbol}:USDT" if ":" not in symbol else symbol
+
+            # ── Cancel ALL orders (regular + algo) for this symbol ──
+            if ex_id == "binance":
+                cancel_result = self._binance_force_cancel_all_orders(exchange, ccxt_symbol)
+                logger.info(f"[TrailingStop] {symbol} 批量撤销结果: {cancel_result} (含 Algo Order)")
+            else:
                 try:
-                    open_orders = exchange.fetch_open_orders(ccxt_symbol)
-                    for order in open_orders:
-                        o_id = order.get("id")
-                        o_type = str(order.get("type", "")).upper()
-                        if "STOP" in o_type or order.get("info", {}).get("reduceOnly") == "true" or order.get("info", {}).get("reduceOnly") is True:
-                            try:
-                                exchange.cancel_order(o_id, ccxt_symbol)
-                                logger.info(f"[TrailingStop] 成功清理交易所侧 {symbol} 的历史触发止损单 #{o_id}")
-                            except Exception as co_e:
-                                logger.warning(f"[TrailingStop] 清理历史触发单 #{o_id} 失败: {co_e}")
-                except Exception as fetch_e:
-                    logger.warning(f"[TrailingStop] 获取挂单清理失败: {fetch_e}")
+                    for o in exchange.fetch_open_orders(ccxt_symbol):
+                        try:
+                            exchange.cancel_order(o.get("id"), ccxt_symbol)
+                        except Exception:
+                            pass
+                except Exception as e:
+                    logger.warning(f"[TrailingStop] {symbol} 撤销挂单失败: {e}")
 
-                # 2. Cancel old protective SL explicitly if recorded
-                old_order_id = t.get("protective_sl_order_id")
-                if old_order_id:
-                    try:
-                        exchange.cancel_order(old_order_id, ccxt_symbol)
-                        logger.info(f"[TrailingStop] 已撤销记录止损单 #{old_order_id}")
-                    except Exception:
-                        pass
-                    t["protective_sl_order_id"] = None
+            old_order_id = t.get("protective_sl_order_id")
+            if old_order_id and old_order_id not in ("existing", None):
+                try:
+                    exchange.cancel_order(old_order_id, ccxt_symbol)
+                except Exception:
+                    pass
+            t["protective_sl_order_id"] = None
 
-                # 3. Place new protective SL order
+            # ── Place new protective SL order with retry ──
+            for attempt in range(MAX_RETRIES):
+                delay = RETRY_DELAYS[min(attempt, len(RETRY_DELAYS) - 1)]
+                time.sleep(delay)
+
                 new_order_id = self._place_live_protective_sl(exchange, ex_id, symbol, sig_type, amount, new_sl)
-                if new_order_id:
-                    t["protective_sl_order_id"] = new_order_id
 
-            except Exception as e:
-                logger.warning(f"[TrailingStop] 更新实盘止损单失败 ({t['symbol']}): {e}")
+                if new_order_id and new_order_id != "existing":
+                    t["protective_sl_order_id"] = new_order_id
+                    logger.info(f"[TrailingStop] ✅ {symbol} 交易所侧止损单已更新至 ${new_sl} (#{new_order_id})")
+                    return
+
+                if new_order_id == "existing":
+                    logger.warning(
+                        f"[TrailingStop] ⚠️ {symbol} 第 {attempt + 1} 次挂设失败（旧单未撤销），"
+                        f"强制重新撤销后重试..."
+                    )
+                    if ex_id == "binance":
+                        self._binance_force_cancel_all_orders(exchange, ccxt_symbol)
+                    else:
+                        try:
+                            for o in exchange.fetch_open_orders(ccxt_symbol):
+                                try:
+                                    exchange.cancel_order(o.get("id"), ccxt_symbol)
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+                    continue
+                logger.warning(f"[TrailingStop] ⚠️ {symbol} 第 {attempt + 1} 次挂设失败，重试...")
+
+            # All retries exhausted
+            t["protective_sl_order_id"] = "existing"
+            logger.error(
+                f"[TrailingStop] ❌ {symbol} 交易所侧止损单 {MAX_RETRIES} 次重试后仍未更新，"
+                f"本地止损为 ${new_sl}，交易所侧可能仍为旧价格"
+            )
+            self._send_notification(
+                f"⚠️ 交易所侧止损单更新失败：{symbol}",
+                f"⚠️ *【止损更新失败提醒】*\n"
+                f"币种：{symbol} ({sig_type.upper()})\n"
+                f"本地止损已更新至 ${new_sl}\n"
+                f"但交易所侧止损单未能更新（可能仍为旧价格）\n"
+                f"请手动检查交易所止损单价格"
+            )
+
+        except Exception as e:
+            logger.warning(f"[TrailingStop] 更新实盘止损单失败 ({t['symbol']}): {e}")
 
     def _cancel_protective_sl(self, trade):
         """Cancel the exchange-side protective stop once the position is closed locally."""
@@ -561,26 +630,90 @@ class SniperEngine:
 
             # 2. Also try to cancel the stored order ID explicitly if it is still open
             order_id = trade.get("protective_sl_order_id")
-            if order_id:
+            if order_id and order_id != "existing":
                 try:
                     exchange.cancel_order(order_id, ccxt_symbol)
                     logger.info(f"[LiveSniper] 保护性止损单 #{order_id} 已随本地平仓撤销 ({symbol})")
                 except Exception:
                     pass
+            elif order_id == "existing":
+                # Already handled by force_cancel_all_orders above
+                logger.info(f"[LiveSniper] {symbol} 止损单为交易所已有单，已通过批量撤销清理")
         except Exception as e:
             logger.warning(f"[LiveSniper] 撤销保护性止损处理出现异常 ({trade.get('symbol')}): {e}")
         finally:
             trade["protective_sl_order_id"] = None
+
+    def _binance_force_cancel_all_orders(self, exchange, ccxt_symbol):
+        """
+        Force-cancel ALL open orders (regular + algo/conditional) for a symbol on Binance.
+        Binance moved STOP_MARKET closePosition orders to the Algo Order API, so we must
+        cancel both regular orders and algo orders to fully clean up.
+        """
+        raw_symbol = ccxt_symbol.replace(":USDT", "").replace("/", "")
+        total_cancelled = 0
+
+        # 1. Cancel regular open orders via bulk API
+        try:
+            exchange.fapiPrivateDeleteAllOpenOrders({"symbol": raw_symbol})
+            total_cancelled += 1
+            logger.info(f"[LiveSniper] Force-cancelled regular orders via bulk API for {ccxt_symbol}")
+        except Exception:
+            # Fallback: fetch and cancel one by one
+            try:
+                open_orders = exchange.fetch_open_orders(ccxt_symbol)
+                for order in open_orders:
+                    try:
+                        exchange.cancel_order(order.get("id"), ccxt_symbol)
+                        total_cancelled += 1
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        # 2. Cancel ALGO orders (STOP_MARKET, TAKE_PROFIT_MARKET with closePosition)
+        #    These are NOT visible via fetch_open_orders and NOT canceled by DeleteAllOpenOrders!
+        try:
+            exchange.fapiPrivateDeleteAlgoOpenOrders({"symbol": raw_symbol})
+            total_cancelled += 1
+            logger.info(f"[LiveSniper] Force-cancelled ALGO orders via bulk API for {ccxt_symbol}")
+        except Exception as algo_e:
+            logger.warning(f"[LiveSniper] Algo bulk cancel failed for {ccxt_symbol}: {algo_e}")
+            # Fallback: fetch algo orders and cancel one by one
+            try:
+                algo_orders = exchange.fapiPrivateGetOpenAlgoOrders({"symbol": raw_symbol})
+                for ao in algo_orders:
+                    algo_id = ao.get("algoId") or ao.get("orderId")
+                    if algo_id:
+                        try:
+                            exchange.fapiPrivateDeleteAlgoOrder({
+                                "symbol": raw_symbol,
+                                "algoId": str(algo_id),
+                            })
+                            total_cancelled += 1
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+        return total_cancelled
 
     def _cancel_all_conditional_orders_for_symbol(self, symbol):
         """
         Cancel ALL conditional/trigger/stop orders on the exchange for a given symbol.
         Called whenever a position exits (manual close, sync-based closure, etc.)
         to prevent orphaned conditional orders from interfering with future positions.
+
+        NOTE: Binance moved STOP_MARKET closePosition orders to the Algo Order API.
+        We must cancel both regular and algo orders to fully clean up.
         """
         try:
             exchange, ex_id = self._init_live_ccxt()
             ccxt_symbol = f"{symbol}:USDT" if ":" not in symbol else symbol
+            # Use the unified force-cancel helper which handles both regular and algo orders
+            if ex_id == "binance":
+                return self._binance_force_cancel_all_orders(exchange, ccxt_symbol)
+            # Fallback for non-Binance: fetch and cancel one by one
             open_orders = exchange.fetch_open_orders(ccxt_symbol)
             cancelled_count = 0
             for order in open_orders:
@@ -588,8 +721,6 @@ class SniperEngine:
                 o_type = str(order.get("type", "")).upper()
                 o_info = order.get("info", {})
                 o_status = str(o_info.get("status", "")).upper()
-                # Cancel any conditional order: STOP_MARKET, TAKE_PROFIT_MARKET,
-                # TRAILING_STOP_MARKET, or any order with reduceOnly / trigger price
                 is_conditional = (
                     "STOP" in o_type
                     or "TAKE_PROFIT" in o_type
@@ -747,24 +878,9 @@ class SniperEngine:
 
         if mode == "live":
             filtered_trades = [t for t in trades if t.get("is_live") is True]
-            account_bal = round(cfg.get("live_account_balance", 0.0), 2)
             if cfg.get("live_api_key") and cfg.get("live_secret"):
-                # Use cached balance (60s TTL) to avoid hammering the exchange
-                _now = time.time()
-                if self._live_balance_cache is not None and (_now - self._live_balance_cache_time) < 60.0:
-                    account_bal = self._live_balance_cache
-                else:
-                    try:
-                        exchange, ex_id = self._init_live_ccxt()
-                        bal = exchange.fetch_balance()
-                        live_usdt = float(bal.get("total", {}).get("USDT", 0.0))
-                        account_bal = round(live_usdt, 2)
-                        self._live_balance_cache = account_bal
-                        self._live_balance_cache_time = _now
-                        cfg["live_account_balance"] = account_bal
-                        self._save_state()
-                    except Exception as e:
-                        logger.warning(f"[SniperEngine] Live balance auto-sync warning: {e}")
+                self._sync_live_balance_cached()
+            account_bal = round(cfg.get("live_account_balance", 0.0), 2)
         else:
             filtered_trades = [t for t in trades if t.get("is_live") is not True]
             account_bal = round(cfg.get("paper_account_balance", 10000.0), 2)
@@ -836,7 +952,7 @@ class SniperEngine:
             "circuit_breaker": {
                 "enabled": bool(cfg.get("circuit_breaker_enabled", True)),
                 "halted": cb_halted,
-                "daily_max_loss_percent": cfg.get("daily_max_loss_percent", 6.0),
+                "daily_max_loss_percent": cfg.get("daily_max_loss_percent", 5.0),
                 "day_realized_pnl": day_realized_pnl,
             },
             "config": dashboard_cfg
@@ -989,10 +1105,11 @@ class SniperEngine:
                     synced_trades = []
                     
                     for t in filtered:
+                        symbol = t["symbol"]
+                        side = t["signal_type"].lower()
+                        key = (symbol, side)
+
                         if t["status"] in ["filled", "tp1_hit"]:
-                            symbol = t["symbol"]
-                            side = t["signal_type"].lower()
-                            key = (symbol, side)
                             if key in real_pos_map:
                                 # Update system active trade stats with real exchange stats
                                 real_pos = real_pos_map[key]
@@ -1022,80 +1139,271 @@ class SniperEngine:
                                         t["locked_pnl_percent"] = 0.0
                                     t["actual_entry"] = ex_entry
                                 updated = True
-                                
+
                                 # Remove from real_pos_map so it's not marked as external
                                 real_pos_map.pop(key)
                             else:
                                 # If active in system but no longer on exchange -> Close it
-                                if t["status"] in ["filled", "tp1_hit"]:
-                                    logger.info(f"[SniperEngine] Syncing external closure for {symbol} ({side}).")
-                                    t["status"] = "closed_tp" if t.get("pnl_usd", 0.0) >= 0 else "closed_sl"
-                                    t["closed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                                    t["close_reason"] = "🗑️ 交易所侧仓位已平仓，系统自动同步平仓状态"
-                                    t["protective_sl_order_id"] = None
-                                    updated = True
-                                    # Clean up orphaned conditional orders on the exchange
-                                    if t.get("is_live"):
-                                        self._cancel_all_conditional_orders_for_symbol(symbol)
+                                logger.info(f"[SniperEngine] Syncing external closure for {symbol} ({side}).")
+                                t["status"] = "closed_tp" if t.get("pnl_usd", 0.0) >= 0 else "closed_sl"
+                                t["closed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                t["close_reason"] = "🗑️ 交易所侧仓位已平仓，系统自动同步平仓状态"
+                                t["protective_sl_order_id"] = None
+                                updated = True
+                                # Clean up orphaned conditional orders on the exchange
+                                if t.get("is_live"):
+                                    self._cancel_all_conditional_orders_for_symbol(symbol)
+
+                        elif t["status"] == "pending" and t.get("is_live") and key in real_pos_map:
+                            # 🔑 Auto-promote: pending limit order was filled on exchange
+                            # but the tick loop hasn't synced via fetch_order yet (or it failed).
+                            # The matching exchange position proves the order was filled.
+                            real_pos = real_pos_map[key]
+                            logger.info(
+                                f"[SniperEngine] Auto-promoting pending live trade {symbol} ({side}) "
+                                f"to filled — matching exchange position detected (entry=${real_pos.get('entry_price')})."
+                            )
+                            t["status"] = "filled"
+                            t["filled_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            ex_entry = float(real_pos.get("entry_price", 0.0) or 0.0)
+                            t["actual_entry"] = ex_entry if ex_entry > 0 else t.get("planned_entry")
+
+                            # Sync core params from exchange
+                            ex_lev = int(real_pos.get("leverage", 0) or 0)
+                            if ex_lev > 0:
+                                t["leverage"] = ex_lev
+                            ex_margin = float(real_pos.get("margin", 0.0) or 0.0)
+                            if ex_margin > 0:
+                                t["margin_usd"] = round(ex_margin, 4)
+                            ex_notional = float(real_pos.get("notional", 0.0) or 0.0)
+                            if ex_notional > 0:
+                                t["position_size_usd"] = round(ex_notional, 2)
+                            t["current_price"] = real_pos.get("mark_price", 0.0)
+                            t["pnl_usd"] = real_pos.get("unrealized_pnl", 0.0)
+                            t["pnl_percent"] = real_pos.get("unrealized_pnl_percent", 0.0)
+                            t["unrealized_pnl_usd"] = real_pos.get("unrealized_pnl", 0.0)
+                            t["unrealized_pnl_percent"] = real_pos.get("unrealized_pnl_percent", 0.0)
+                            t["exchange_pnl_percent"] = real_pos.get("unrealized_pnl_percent", 0.0)
+                            t["peak_pnl_pct"] = 0.0
+                            t["trailing_sl_level"] = 0.0
+                            t["locked_pnl_percent"] = 0.0
+
+                            # Place protective SL on exchange if not already set
+                            if not t.get("protective_sl_order_id"):
+                                try:
+                                    sl_exchange, sl_ex_id = self._init_live_ccxt()
+                                    filled_amount = float(real_pos.get("size", 0.0) or 0.0)
+                                    if filled_amount <= 0 and t["actual_entry"] and float(t["actual_entry"]) > 0:
+                                        filled_amount = round(float(t["position_size_usd"]) / float(t["actual_entry"]), 4)
+                                    prot_id = self._place_live_protective_sl(
+                                        sl_exchange, sl_ex_id, symbol, side,
+                                        filled_amount, t["stop_loss"]
+                                    )
+                                    if prot_id:
+                                        t["protective_sl_order_id"] = prot_id
+                                except Exception as prot_e:
+                                    logger.warning(
+                                        f"[SniperEngine] Failed to place protective SL for auto-promoted {symbol}: {prot_e}"
+                                    )
+
+                            # Remove from real_pos_map so it's not marked as external
+                            real_pos_map.pop(key)
+                            updated = True
+
+                            self._send_notification(
+                                f"⚡ 狙击实盘建仓成功（持仓同步自动确认）：{symbol}",
+                                f"⚡ *【实盘建仓履约通知（持仓同步自动确认）】*\n"
+                                f"币种：{symbol} ({side.upper()})\n"
+                                f"建仓价：${t['actual_entry']}\n"
+                                f"杠杆：{t.get('leverage', '?')}x | 保证金：${t.get('margin_usd', '?')}\n"
+                                f"防守位：${t['stop_loss']} | 目标位：{t.get('take_profit_targets', ['?'])[0] if t.get('take_profit_targets') else '?'}\n"
+                                f"交易所侧保护止损单：{'已挂设 ✅' if t.get('protective_sl_order_id') and t.get('protective_sl_order_id') != 'existing' else ('已存在（交易所侧已有止损单）✅' if t.get('protective_sl_order_id') == 'existing' else '未挂设 ⚠️')}"
+                            )
+
                         synced_trades.append(t)
                     
-                    # Add remaining positions from map as mock external trades
-                    # Skip any symbols that were recently manually closed (tombstone)
+                    # 🔑 Auto-adopt: exchange positions without matching system trades
+                    # are automatically adopted as system-managed trades so the tick
+                    # loop can monitor stop-loss, trailing, and TP for them.
+                    # Skip any symbols that were recently manually closed (tombstone).
                     _now = time.time()
                     self._closed_external_symbols = {s: exp for s, exp in self._closed_external_symbols.items() if exp > _now}
-                    
-                    external_trades = []
+
+                    cfg = self.state.get("config", {})
+                    max_loss_pct = float(cfg.get("max_trade_loss_percent", 50.0))
                     for (symbol, side), pos in real_pos_map.items():
                         # Skip if this symbol was manually closed and tombstone hasn't expired
                         if symbol in self._closed_external_symbols:
-                            logger.info(f"[SniperEngine] Skipping tombstoned symbol {symbol} from external positions.")
+                            logger.info(f"[SniperEngine] Skipping tombstoned symbol {symbol} from auto-adopt.")
                             continue
-                        mock_t = {
-                            "id": f"external-{pos['symbol']}-{pos['side']}",
-                            "symbol": pos["symbol"],
-                            "signal_type": pos["side"],
-                            "status": "filled",
-                            "confidence_score": "-",
-                            "entry_min": "-",
-                            "entry_max": "-",
-                            "planned_entry": "-",
-                            "actual_entry": pos["entry_price"],
-                            "stop_loss": "-",
-                            "take_profit_targets": [],
-                            "leverage": pos["leverage"],
-                            "position_size_usd": round(pos["notional"], 2),
-                            "margin_usd": round(pos["margin"], 2),
-                            "entered_at": "-",
-                            "closed_at": None,
-                            "pnl_usd": round(pos["unrealized_pnl"], 2),
-                            "pnl_percent": round(pos["unrealized_pnl_percent"], 2),
-                            "unrealized_pnl_usd": round(pos["unrealized_pnl"], 2),
-                            "unrealized_pnl_percent": round(pos["unrealized_pnl_percent"], 2),
-                            "is_live": True,
-                            "is_external": True,
-                            "current_price": pos["mark_price"]
-                        }
-                        external_trades.append(mock_t)
-                    
+
+                        entry_px = pos["entry_price"]
+                        lev = pos["leverage"] or 1
+                        # Auto-calculate a percentage-based SL (local safety net)
+                        sl_dist_pct = max_loss_pct / 100.0 / lev
+                        if pos["side"] == "long":
+                            auto_sl = round(entry_px * (1 - sl_dist_pct), 6)
+                        else:
+                            auto_sl = round(entry_px * (1 + sl_dist_pct), 6)
+
+                        # Calculate default TP targets based on entry/SL (1.5x and 3x risk-reward)
+                        sl_risk = abs(entry_px - auto_sl)
+                        if pos["side"] == "long":
+                            auto_tp1 = round(entry_px + sl_risk * 1.5, 6)
+                            auto_tp2 = round(entry_px + sl_risk * 3.0, 6)
+                        else:
+                            auto_tp1 = round(entry_px - sl_risk * 1.5, 6)
+                            auto_tp2 = round(entry_px - sl_risk * 3.0, 6)
+
+                        # Check if there's a closed trade for this symbol+side that we can reopen
+                        closed_trade = None
+                        for existing_t in self.state.get("trades", []):
+                            if (existing_t.get("symbol") == symbol and
+                                existing_t.get("signal_type", "").lower() == side and
+                                existing_t["status"] in ["closed_tp", "closed_sl"] and
+                                existing_t.get("is_live")):
+                                closed_trade = existing_t
+                                break
+
+                        if closed_trade:
+                            # Reopen the closed trade — the exchange position is still alive
+                            logger.info(
+                                f"[SniperEngine] Reopening closed trade {closed_trade['id']} for {symbol} ({side}) "
+                                f"— exchange position still exists (entry=${entry_px})."
+                            )
+                            closed_trade["status"] = "filled"
+                            closed_trade["closed_at"] = None
+                            closed_trade["close_reason"] = ""
+                            closed_trade["actual_entry"] = entry_px
+                            closed_trade["stop_loss"] = auto_sl
+                            closed_trade["initial_stop_loss"] = auto_sl
+                            closed_trade["pnl_usd"] = round(pos["unrealized_pnl"], 2)
+                            closed_trade["pnl_percent"] = round(pos["unrealized_pnl_percent"], 2)
+                            closed_trade["unrealized_pnl_usd"] = round(pos["unrealized_pnl"], 2)
+                            closed_trade["unrealized_pnl_percent"] = round(pos["unrealized_pnl_percent"], 2)
+                            closed_trade["current_price"] = pos["mark_price"]
+                            closed_trade["peak_pnl_pct"] = 0.0
+                            closed_trade["trailing_sl_level"] = 0.0
+                            closed_trade["locked_pnl_percent"] = 0.0
+                            closed_trade["tp1_partial_closed"] = False
+                            closed_trade["exchange_pnl_percent"] = pos["unrealized_pnl_percent"]
+                            closed_trade["auto_adopted"] = True
+                            ex_lev = int(pos.get("leverage", 0) or 0)
+                            if ex_lev > 0:
+                                closed_trade["leverage"] = ex_lev
+                            ex_margin = float(pos.get("margin", 0.0) or 0.0)
+                            if ex_margin > 0:
+                                closed_trade["margin_usd"] = round(ex_margin, 4)
+                            ex_notional = float(pos.get("notional", 0.0) or 0.0)
+                            if ex_notional > 0:
+                                closed_trade["position_size_usd"] = round(ex_notional, 2)
+                            adopted_trade = closed_trade
+                        else:
+                            # Create a new system trade for this orphaned exchange position
+                            adopted_id = f"trade-adopted-{int(time.time() * 1000)}"
+                            logger.info(
+                                f"[SniperEngine] Auto-adopting orphaned exchange position {symbol} ({side}) "
+                                f"as system trade {adopted_id} (entry=${entry_px}, SL=${auto_sl})."
+                            )
+                            adopted_trade = {
+                                "id": adopted_id,
+                                "symbol": symbol,
+                                "signal_type": side,
+                                "status": "filled",
+                                "confidence_score": "-",
+                                "entry_min": entry_px,
+                                "entry_max": entry_px,
+                                "planned_entry": entry_px,
+                                "ladder": [],
+                                "ladder_filled_count": 1,
+                                "actual_entry": entry_px,
+                                "stop_loss": auto_sl,
+                                "initial_stop_loss": auto_sl,
+                                "take_profit_targets": [auto_tp1, auto_tp2],
+                                "leverage": lev,
+                                "position_size_usd": round(pos["notional"], 2),
+                                "margin_usd": round(pos["margin"], 2),
+                                "entered_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                "filled_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                "closed_at": None,
+                                "pnl_usd": round(pos["unrealized_pnl"], 2),
+                                "pnl_percent": round(pos["unrealized_pnl_percent"], 2),
+                                "unrealized_pnl_usd": round(pos["unrealized_pnl"], 2),
+                                "unrealized_pnl_percent": round(pos["unrealized_pnl_percent"], 2),
+                                "exchange_pnl_percent": pos["unrealized_pnl_percent"],
+                                "close_reason": "",
+                                "tp1_partial_closed": False,
+                                "is_live": True,
+                                "live_order_id": None,
+                                "live_exchange": cfg.get("live_exchange", "binance"),
+                                "protective_sl_order_id": None,
+                                "fees_usd": 0.0,
+                                "current_price": pos["mark_price"],
+                                "peak_pnl_pct": 0.0,
+                                "trailing_sl_level": 0.0,
+                                "locked_pnl_percent": 0.0,
+                                "auto_adopted": True,
+                            }
+                            self.state["trades"].append(adopted_trade)
+
+                        updated = True
+
+                        # Try to place protective SL on exchange if not already set
+                        if not adopted_trade.get("protective_sl_order_id"):
+                            try:
+                                sl_exchange, sl_ex_id = self._init_live_ccxt()
+                                filled_amount = float(pos.get("size", 0.0) or 0.0)
+                                if filled_amount <= 0 and entry_px > 0:
+                                    filled_amount = round(float(pos["notional"]) / entry_px, 4)
+                                prot_id = self._place_live_protective_sl(
+                                    sl_exchange, sl_ex_id, symbol, side,
+                                    filled_amount, auto_sl
+                                )
+                                if prot_id:
+                                    adopted_trade["protective_sl_order_id"] = prot_id
+                            except Exception as prot_e:
+                                logger.warning(
+                                    f"[SniperEngine] Failed to place protective SL for auto-adopted {symbol}: {prot_e}"
+                                )
+
+                        sl_status = "已挂设 ✅" if adopted_trade.get("protective_sl_order_id") else "未挂设 ⚠️"
+                        if adopted_trade.get("protective_sl_order_id") == "existing":
+                            sl_status = "已存在（交易所侧已有止损单）✅"
+                        self._send_notification(
+                            f"🔄 自动领养外部持仓：{symbol}",
+                            f"🔄 *【外部持仓自动领养通知】*\n"
+                            f"币种：{symbol} ({side.upper()})\n"
+                            f"建仓价：${entry_px}\n"
+                            f"杠杆：{lev}x | 保证金：${round(pos['margin'], 2)}\n"
+                            f"自动止损：${auto_sl}（{max_loss_pct}%保证金亏损）\n"
+                            f"止盈目标：${auto_tp1} / ${auto_tp2}\n"
+                            f"交易所侧保护止损单：{sl_status}\n"
+                            f"系统已接管该仓位的监控与风控管理。"
+                        )
+
+                        # Only append newly created trades to synced_trades;
+                        # reopened trades are already in synced_trades from the first loop
+                        if not closed_trade:
+                            synced_trades.append(adopted_trade)
+
                     if updated:
                         self._save_state()
-                    
-                    all_returned_trades = synced_trades + external_trades
-                    return sorted(all_returned_trades, key=lambda x: x.get("entered_at", "") or "", reverse=True)
+
+                    return sorted(synced_trades, key=lambda x: x.get("entered_at", "") or "", reverse=True)
         else:
             filtered = [t for t in trades if t.get("is_live") is not True]
             
         return sorted(filtered, key=lambda x: x.get("entered_at", "") or "", reverse=True)
 
-    def calculate_trade_params(self, balance, risk_pct, entry_price, stop_loss, confidence, max_lev=70):
+    def calculate_trade_params(self, balance, risk_pct, entry_price, stop_loss, confidence, max_lev=50):
         cfg = self.state.get("config", {})
         lev_mode = cfg.get("leverage_mode", "smart")
         
         if lev_mode == "fixed":
-            suggested_lev = int(cfg.get("fixed_leverage", 50))
+            suggested_lev = int(cfg.get("fixed_leverage", 30))
         else:
-            min_lev = int(cfg.get("min_leverage", 35))
-            target_max_lev = int(cfg.get("max_leverage", 70))
+            min_lev = int(cfg.get("min_leverage", 20))
+            target_max_lev = int(max_lev) if max_lev else int(cfg.get("max_leverage", 50))
             if min_lev > target_max_lev:
                 min_lev, target_max_lev = target_max_lev, min_lev
                 
@@ -1121,7 +1429,7 @@ class SniperEngine:
             pos_value_usd = margin_usd * suggested_lev
         else:
             # "smart" mode: risk-scaled sizing based on stop loss distance
-            conf_risk_mult = 0.8 + (min(confidence, 10) - 7) * 0.133  # 7→0.8, 8→0.93, 9→1.07, 10→1.2
+            conf_risk_mult = 0.8 + (min(confidence, 12) - 7) * 0.08  # 7→0.8, 9→0.96, 12→1.2
             conf_risk_mult = max(0.6, min(1.3, conf_risk_mult))
             risk_amount = balance * (risk_pct / 100.0) * conf_risk_mult
 
@@ -1153,9 +1461,11 @@ class SniperEngine:
 
     # --- Adaptive Risk Engine -------------------------------------------
     def _get_recent_win_rate(self, lookback=10):
-        """Calculate win rate from the last N closed trades."""
+        """Calculate win rate from the last N closed trades (same mode only)."""
         trades = self.state.get("trades", [])
-        closed = [t for t in trades if t["status"] in ("closed_tp", "closed_sl")]
+        is_live = self.state.get("config", {}).get("mode") == "live"
+        closed = [t for t in trades if t["status"] in ("closed_tp", "closed_sl")
+                  and bool(t.get("is_live")) == is_live]
         closed.sort(key=lambda x: x.get("closed_at", ""), reverse=True)
         recent = closed[:lookback]
         if len(recent) < 3:
@@ -1203,9 +1513,12 @@ class SniperEngine:
         - 3 consecutive SL: 0.5x
         - 4+ consecutive SL: 0.3x
         Resets on any TP hit.
+        Only counts trades from the current mode (paper/live).
         """
         trades = self.state.get("trades", [])
-        closed = [t for t in trades if t["status"] in ("closed_tp", "closed_sl")]
+        is_live = self.state.get("config", {}).get("mode") == "live"
+        closed = [t for t in trades if t["status"] in ("closed_tp", "closed_sl")
+                  and bool(t.get("is_live")) == is_live]
         closed.sort(key=lambda x: x.get("closed_at", ""), reverse=True)
 
         consecutive_sl = 0
@@ -1470,6 +1783,43 @@ class SniperEngine:
             logger.warning(f"[LiveSniper] Balance sync warning: {e}")
         return self.state.get("config", {}).get("live_account_balance", 10.0)
 
+    def _sync_live_balance_cached(self):
+        """
+        Background-safe live balance sync with 60s TTL to avoid rate limits.
+        Updates the circuit breaker's view of the live account balance.
+        """
+        cfg = self.state.get("config", {})
+        if cfg.get("mode") != "live" or not cfg.get("live_api_key") or not cfg.get("live_secret"):
+            return cfg.get("live_account_balance", 0.0)
+
+        _now = time.time()
+        if self._live_balance_cache is not None and (_now - self._live_balance_cache_time) < 60.0:
+            return self._live_balance_cache
+
+        try:
+            exchange, ex_id = self._init_live_ccxt()
+            bal = exchange.fetch_balance()
+            # Fetch total USDT equity to accurately reflect PnL changes for circuit breaker
+            live_usdt = float(bal.get("total", {}).get("USDT", 0.0))
+            if live_usdt > 0:
+                account_bal = round(live_usdt, 2)
+                self._live_balance_cache = account_bal
+                self._live_balance_cache_time = _now
+                self._live_balance_sync_fail_count = 0
+                self._live_balance_warned_disabled = False
+                cfg["live_account_balance"] = account_bal
+                self._save_state()
+                return account_bal
+        except Exception as e:
+            self._live_balance_sync_fail_count += 1
+            if self._live_balance_sync_fail_count <= 3 or self._live_balance_sync_fail_count % 10 == 0:
+                logger.warning(
+                    f"[SniperEngine] Live balance sync failed ({self._live_balance_sync_fail_count}x): {e}. "
+                    f"Circuit breaker may use stale balance ${cfg.get('live_account_balance', 0.0)}."
+                )
+
+        return cfg.get("live_account_balance", 0.0)
+
     def _execute_live_market_close(self, symbol, side, amount, reason="", expected_entry=None):
         """
         Dual Insurance: Fallback active market close order to force-close live positions!
@@ -1607,6 +1957,9 @@ class SniperEngine:
         if mode == "off":
             return None
 
+        # Extract signal type early so it's available for all risk-control log messages
+        sig_type_check = str(json_signal.get("signal_type", "wait")).lower()
+
         # 🚨 Daily circuit breaker: refuse all new trades while halted
         if self._check_circuit_breaker():
             msg = f"⚠️ [狙击系统] 今日日内亏损熔断已触发，已自动拦截新信号 {symbol} ({sig_type_check.upper()}) 挂单。"
@@ -1648,7 +2001,6 @@ class SniperEngine:
             {"BTC/USDT", "ETH/USDT"},           # BTC-ETH high correlation
             {"DOGE/USDT", "HYPE/USDT"},         # Alt-meme correlation
         ]
-        sig_type_check = str(json_signal.get("signal_type", "wait")).lower()
         trades = self.state.get("trades", [])
         active_filled = [t for t in trades if t["status"] in ["filled", "tp1_hit"]]
         for group in CORRELATED_GROUPS:
@@ -1687,6 +2039,12 @@ class SniperEngine:
         if existing_active:
             for old_t in existing_active:
                 if old_t["status"] == "pending":
+                    old_pending_sig = old_t["signal_type"]
+                    if old_pending_sig == sig_type:
+                        # Same-direction pending order already exists — reject duplicate to avoid double-position risk
+                        logger.info(f"[SniperEngine] Symbol {symbol} already has a PENDING order in SAME direction ({sig_type}). Rejecting duplicate signal.")
+                        return None
+                    # Opposite-direction pending: LLM changed mind, cancel old pending and create new opposite order
                     if old_t.get("is_live") and old_t.get("live_order_id"):
                         try:
                             exchange, ex_id = self._init_live_ccxt()
@@ -1700,8 +2058,8 @@ class SniperEngine:
                             return None
 
                     old_t["status"] = "cancelled"
-                    old_t["close_reason"] = f"🔄 大模型更新 {sig_type.upper()} 点位策略，原未成交挂单已自动撤单重置"
-                    logger.info(f"[SniperEngine] Cancelled old pending trade for {symbol} to replace with new {sig_type.upper()} signal.")
+                    old_t["close_reason"] = f"🔄 大模型转向 {sig_type.upper()}，原 {old_pending_sig.upper()} 未成交挂单已自动撤单重置"
+                    logger.info(f"[SniperEngine] Cancelled old pending {old_pending_sig.upper()} trade for {symbol} to replace with new {sig_type.upper()} signal (direction change).")
                 else:
                     # Position is active (filled or tp1_hit)
                     old_sig = old_t["signal_type"]
@@ -1710,6 +2068,10 @@ class SniperEngine:
                         return None
                     else:
                         # 🔄 REVERSAL DETECTED! (e.g. Existing SHORT vs New High-Confidence LONG)
+                        # Require high confidence (>=10) for reversals to prevent whipsaw losses
+                        if conf < 10:
+                            logger.warning(f"[SniperEngine] [{symbol}] Reversal requires confidence >=10, got {conf}. Rejecting {sig_type.upper()} reversal signal against existing {old_sig.upper()} position.")
+                            return None
                         close_px = float(current_price) if (current_price and float(current_price) > 0) else float(old_t.get("current_price", 0.0))
                         if close_px <= 0:
                             close_px = float(old_t.get("actual_entry", 0.0))
@@ -1721,18 +2083,20 @@ class SniperEngine:
                                 logger.warning(f"[SniperEngine] [{symbol}] Reversal close FAILED on exchange — aborting reversal, keeping old {old_sig.upper()} position")
                                 return None
 
-                        # Calculate final net PnL for old_t
+                        # Calculate final net PnL for old_t (apply slippage — reversal is a market close)
+                        taker_fee, _, slippage = self._fee_rates()
                         lev = old_t.get("leverage", 1)
                         margin = old_t.get("margin_usd", 0.0)
                         actual_entry = old_t.get("actual_entry") or old_t.get("planned_entry", close_px)
                         rem_ratio = 0.5 if old_t.get("tp1_partial_closed") else 1.0
 
                         if old_sig == "long":
-                            raw_pct = (close_px - actual_entry) / actual_entry * lev
+                            exec_close_px = close_px * (1 - slippage)
+                            raw_pct = (exec_close_px - actual_entry) / actual_entry * lev
                         else:
-                            raw_pct = (actual_entry - close_px) / actual_entry * lev
+                            exec_close_px = close_px * (1 + slippage)
+                            raw_pct = (actual_entry - exec_close_px) / actual_entry * lev
 
-                        taker_fee, _, _ = self._fee_rates()
                         exit_fee = self._record_fee(old_t, old_t.get("position_size_usd", 0.0) * rem_ratio, taker_fee)
                         leg_net = round(margin * rem_ratio * raw_pct - exit_fee, 2)
 
@@ -1826,7 +2190,7 @@ class SniperEngine:
 
         balance = cfg.get("live_account_balance" if mode == "live" else "paper_account_balance", 10000.0)
         risk_pct = cfg.get("risk_per_trade_percent", 2.0)
-        max_lev = cfg.get("max_leverage", 15)
+        max_lev = cfg.get("max_leverage", 50)
 
         # 📊 Adaptive risk: adjust risk_pct based on recent win rate
         risk_pct = self._adaptive_risk_adjust(risk_pct)
@@ -2030,6 +2394,10 @@ class SniperEngine:
         if mode == "off":
             return
 
+        # 🔄 Keep the circuit breaker's view of balance up-to-date in the background
+        if mode == "live":
+            self._sync_live_balance_cached()
+
         # 🚨 Circuit breaker check on every tick: cancels pending orders and
         # blocks further fills once today's loss limit is breached
         halted = self._check_circuit_breaker()
@@ -2045,14 +2413,60 @@ class SniperEngine:
             if real_positions:
                 live_pos_map = {(p["symbol"], p["side"]): p for p in real_positions}
                 for t in trades:
-                    if t["status"] not in ["filled", "tp1_hit"]:
-                        continue
                     if not t.get("is_live"):
                         continue
                     key = (t["symbol"], t["signal_type"].lower())
                     rp = live_pos_map.get(key)
                     if rp is None:
                         continue
+
+                    # 🔑 Auto-promote pending live trades that have matching exchange
+                    # positions (fallback when fetch_order fails or hasn't run yet).
+                    if t["status"] == "pending":
+                        logger.info(
+                            f"[SniperEngine] Auto-promoting pending live trade {t['symbol']} ({t['signal_type']}) "
+                            f"to filled in tick loop — matching exchange position detected."
+                        )
+                        t["status"] = "filled"
+                        t["filled_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        ex_entry = float(rp.get("entry_price", 0.0) or 0.0)
+                        t["actual_entry"] = ex_entry if ex_entry > 0 else t.get("planned_entry")
+                        t["peak_pnl_pct"] = 0.0
+                        t["trailing_sl_level"] = 0.0
+                        t["locked_pnl_percent"] = 0.0
+                        updated = True
+
+                        # Place protective SL if not already set
+                        if not t.get("protective_sl_order_id"):
+                            try:
+                                sl_exchange, sl_ex_id = self._init_live_ccxt()
+                                filled_amount = float(rp.get("size", 0.0) or 0.0)
+                                if filled_amount <= 0 and t["actual_entry"] and float(t["actual_entry"]) > 0:
+                                    filled_amount = round(float(t["position_size_usd"]) / float(t["actual_entry"]), 4)
+                                prot_id = self._place_live_protective_sl(
+                                    sl_exchange, sl_ex_id, t["symbol"], t["signal_type"].lower(),
+                                    filled_amount, t["stop_loss"]
+                                )
+                                if prot_id:
+                                    t["protective_sl_order_id"] = prot_id
+                            except Exception as prot_e:
+                                logger.warning(
+                                    f"[SniperEngine] Failed to place protective SL for auto-promoted {t['symbol']}: {prot_e}"
+                                )
+
+                        self._send_notification(
+                            f"⚡ 狙击实盘建仓成功（tick循环自动确认）：{t['symbol']}",
+                            f"⚡ *【实盘建仓履约通知（tick循环自动确认）】*\n"
+                            f"币种：{t['symbol']} ({t['signal_type'].upper()})\n"
+                            f"建仓价：${t['actual_entry']}\n"
+                            f"杠杆：{t.get('leverage', '?')}x | 保证金：${t.get('margin_usd', '?')}\n"
+                            f"防守位：${t['stop_loss']} | 目标位：{t.get('take_profit_targets', ['?'])[0] if t.get('take_profit_targets') else '?'}\n"
+                            f"交易所侧保护止损单：{'已挂设 ✅' if t.get('protective_sl_order_id') and t.get('protective_sl_order_id') != 'existing' else ('已存在（交易所侧已有止损单）✅' if t.get('protective_sl_order_id') == 'existing' else '未挂设 ⚠️')}"
+                        )
+
+                    elif t["status"] not in ["filled", "tp1_hit"]:
+                        continue
+
                     # Unconditionally overwrite from exchange — no conditions
                     ex_lev = int(rp.get("leverage", 0) or 0)
                     if ex_lev > 0:
@@ -2141,12 +2555,35 @@ class SniperEngine:
                             f"⚡ *【实盘建仓履约通知】*\n币种：{symbol} ({sig_type.upper()})\n建仓价：${t['actual_entry']}\n杠杆：{lev}x | 保证金：${margin}\n防守位：${sl} | 目标位：${tps[0]}\n交易所侧保护止损单：{'已挂设 ✅' if t.get('protective_sl_order_id') else '未挂设 ⚠️'}"
                         )
                     elif ord_status == "canceled":
-                        t["status"] = "cancelled"
-                        t["close_reason"] = "实盘交易所订单已被撤销"
-                        updated = True
-                        # Clean up SL/TP conditional orders that may still be attached
-                        if t.get("is_live"):
-                            self._cancel_all_conditional_orders_for_symbol(symbol)
+                        filled_amt = float(live_ord.get("filled") or 0.0)
+                        if filled_amt > 0:
+                            # It was partially filled then canceled. Convert to a filled trade!
+                            t["status"] = "filled"
+                            t["actual_entry"] = float(live_ord.get("average") or live_ord.get("price") or planned_entry)
+                            t["filled_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            
+                            # Adjust position size and margin to reflect the partial fill
+                            t["position_size_usd"] = filled_amt * t["actual_entry"]
+                            t["margin_usd"] = t["position_size_usd"] / lev
+                            
+                            updated = True
+                            
+                            if not t.get("protective_sl_order_id"):
+                                prot_id = self._place_live_protective_sl(exchange, ex_id, symbol, sig_type, filled_amt, sl)
+                                if prot_id:
+                                    t["protective_sl_order_id"] = prot_id
+                                    
+                            self._send_notification(
+                                f"⚡ 狙击实盘部分建仓成单：{symbol}",
+                                f"⚡ *【实盘部分建仓后撤单通知】*\n币种：{symbol} ({sig_type.upper()})\n成交价：${t['actual_entry']}\n成交价值：${round(t['position_size_usd'], 2)}\n剩余挂单已撤销，现有仓位继续按风控管理。"
+                            )
+                        else:
+                            t["status"] = "cancelled"
+                            t["close_reason"] = "实盘交易所订单已被撤销"
+                            updated = True
+                            # Clean up SL/TP conditional orders that may still be attached
+                            if t.get("is_live"):
+                                self._cancel_all_conditional_orders_for_symbol(symbol)
                 except Exception as sync_e:
                     logger.warning(f"[LiveSniper] Order sync warning for {symbol}: {sync_e}")
 
@@ -2169,11 +2606,13 @@ class SniperEngine:
                                 exchange, ex_id = self._init_live_ccxt()
                                 ccxt_symbol = f"{symbol}:USDT" if ":" not in symbol else symbol
                                 exchange.cancel_order(t["live_order_id"], ccxt_symbol)
-                                # Clean up SL/TP conditional orders attached to the expired pending order
-                                self._cancel_all_conditional_orders_for_symbol(symbol)
+                                logger.info(f"[LiveSniper] TTL cancel issued for {symbol} after {round(age_hours, 1)}h.")
                             except Exception as e:
                                 logger.warning(f"[LiveSniper] TTL cancel failed for {symbol}: {e} — 保留挂单，下一 tick 重试")
-                                continue
+                            # Skip local state transition. Let the fetch_order block handle the "canceled" status 
+                            # on the next tick so it can gracefully handle partial fills.
+                            continue
+
                         t["status"] = "cancelled"
                         t["close_reason"] = f"⏳ 挂单超过 {int(ttl_hours)} 小时未成交，点位失效自动撤单"
                         updated = True
@@ -2199,9 +2638,13 @@ class SniperEngine:
                             exchange, ex_id = self._init_live_ccxt()
                             ccxt_symbol = f"{symbol}:USDT" if ":" not in symbol else symbol
                             exchange.cancel_order(t["live_order_id"], ccxt_symbol)
-                            self._cancel_all_conditional_orders_for_symbol(symbol)
+                            logger.info(f"[LiveSniper] Invalidated cancel issued for {symbol}")
                         except Exception as inv_e:
                             logger.warning(f"[LiveSniper] Invalidated cancel failed for {symbol}: {inv_e}")
+                        # Skip local state transition. Let the fetch_order block handle the "canceled" status 
+                        # on the next tick so it can gracefully handle partial fills.
+                        continue
+
                     t["status"] = "cancelled"
                     t["close_reason"] = f"⚠️ 价格 (${low_price if sig_type == 'long' else high_price}) 未回踩埋伏位，先行穿透防守线 (${sl})，结构破坏挂单自动作废"
                     updated = True
@@ -2274,7 +2717,7 @@ class SniperEngine:
 
             # 💸 Funding fee model (paper)
             if not t.get("is_live") and t["status"] in ["filled", "tp1_hit"]:
-                funding_rate = float(cfg.get("funding_rate_per_8h", 0.0001))
+                funding_rate = float(cfg.get("funding_rate_per_8h", 0.0003))
                 if funding_rate > 0:
                     current_epoch = int(time.time() // FUNDING_EPOCH_SECONDS)
                     last_epoch = t.get("funding_epoch")
@@ -2292,6 +2735,11 @@ class SniperEngine:
                             cfg["paper_account_balance"] = round(cfg.get("paper_account_balance", 0.0) - funding_fee, 4)
                             updated = True
                             logger.info(f"[SniperEngine] [{symbol}] Funding fee charged: ${funding_fee}")
+                            # Warn when cumulative funding fees exceed 1% of margin (cost drag alert)
+                            cum_funding = t.get("funding_fees_usd", 0.0)
+                            if margin > 0 and cum_funding > margin * 0.01 and not t.get("funding_warned"):
+                                t["funding_warned"] = True
+                                logger.warning(f"[SniperEngine] [{symbol}] 资金费累计 ${cum_funding} 已超过保证金1%，注意资金费率成本侵蚀！")
 
             # ⏰ Time-based stop: close stale positions that haven't reached TP1 after 72h
             if t["status"] == "filled" and not t.get("tp1_partial_closed"):
@@ -2305,11 +2753,13 @@ class SniperEngine:
                 if max_hold_hours > 0 and hold_hours > max_hold_hours:
                     # Close at current market price — position is stale
                     close_px = current_price
-                    if sig_type == "long":
-                        stale_pnl = amount * (close_px - actual_entry)
-                    else:
-                        stale_pnl = amount * (actual_entry - close_px)
                     taker_fee, _, slippage = self._fee_rates()
+                    if sig_type == "long":
+                        exec_close_px = close_px * (1 - slippage)
+                        stale_pnl = amount * (exec_close_px - actual_entry)
+                    else:
+                        exec_close_px = close_px * (1 + slippage)
+                        stale_pnl = amount * (actual_entry - exec_close_px)
                     exit_fee = self._record_fee(t, pos_val, taker_fee)
                     stale_net = round(stale_pnl - exit_fee, 2)
                     close_reason = f"⏰ 持仓超过 {int(max_hold_hours)}h 未达 TP1，时间止损市价平仓 (PnL: ${stale_net})"
@@ -2333,14 +2783,72 @@ class SniperEngine:
                     )
                     continue
 
+            # ⏰ Time-based stop for TP1-hit positions: close remaining 50% if held too long after TP1
+            if t["status"] == "tp1_hit":
+                try:
+                    # Use filled_at as baseline since TP1 was hit during this trade's lifetime
+                    fill_dt_str = t.get("filled_at") or t.get("entered_at", "")
+                    fill_dt = datetime.strptime(fill_dt_str, "%Y-%m-%d %H:%M:%S")
+                    tp1_hold_hours = (datetime.now() - fill_dt).total_seconds() / 3600.0
+                except Exception:
+                    tp1_hold_hours = 0.0
+                # After TP1, allow max_hold_hours * 1.5 total hold time before closing remaining
+                tp1_max_hours = float(cfg.get("max_hold_hours", 72.0)) * 1.5
+                if tp1_max_hours > 0 and tp1_hold_hours > tp1_max_hours:
+                    close_px = current_price
+                    taker_fee, _, slippage = self._fee_rates()
+                    rem_amount = round(amount * 0.5, 4)
+                    rem_pos_val = pos_val * 0.5
+                    if sig_type == "long":
+                        exec_close_px = close_px * (1 - slippage)
+                        stale_pnl = rem_amount * (exec_close_px - actual_entry)
+                    else:
+                        exec_close_px = close_px * (1 + slippage)
+                        stale_pnl = rem_amount * (actual_entry - exec_close_px)
+                    exit_fee = self._record_fee(t, rem_pos_val, taker_fee)
+                    stale_net = round(stale_pnl - exit_fee, 2)
+                    close_reason = f"⏰ TP1后持仓超过 {int(tp1_max_hours)}h 未达终极止盈，时间止损市价平仓剩余50% (PnL: ${stale_net})"
+                    if t.get("is_live"):
+                        if not self._try_live_close(t, symbol, sig_type, rem_amount, reason=close_reason, alert_tag="time_stop", current_price=close_px):
+                            updated = True
+                            continue
+                    t["pnl_usd"] = round(t.get("pnl_usd", 0.0) + stale_net, 2)
+                    t["pnl_percent"] = round((t["pnl_usd"] / margin) * 100.0, 2) if margin > 0 else 0.0
+                    t["status"] = "closed_tp" if stale_net >= 0 else "closed_sl"
+                    t["closed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    t["close_reason"] = close_reason
+                    if not t.get("is_live"):
+                        cfg["paper_account_balance"] = round(cfg.get("paper_account_balance", 0.0) + stale_net, 2)
+                    updated = True
+                    logger.info(f"[SniperEngine] [{symbol}] TP1 time-stop: held {round(tp1_hold_hours, 1)}h > {tp1_max_hours}h total, closed remaining at ${close_px}, PnL=${stale_net}")
+                    self._send_notification(
+                        f"⏰ TP1后时间止损平仓：{symbol}",
+                        f"⏰ *【TP1后时间止损通知】*\n币种：{symbol} ({sig_type.upper()})\nTP1后持仓时长：{round(tp1_hold_hours, 1)}h（超过 {int(tp1_max_hours)}h 总持仓时限）\n平仓价：${close_px}\n剩余仓位实现盈亏：${stale_net} USD\n累计盈亏：${t['pnl_usd']} USD ({t['pnl_percent']}%)"
+                    )
+                    continue
+
             # 🛡️ PnL-based risk control (风控用实际盈亏做风控)
-            max_trade_loss_pct = float(cfg.get("max_trade_loss_percent", 80.0))
-            pnl_breached = (float_pct * 100.0 <= -max_trade_loss_pct)
+            # Check BOTH close-based PnL AND worst-case (wick-based) PnL to catch gap-through scenarios
+            max_trade_loss_pct = float(cfg.get("max_trade_loss_percent", cfg.get("max_trade_loss_pct", 50.0)))
+            if sig_type == "long":
+                worst_price = low_price
+                worst_pnl_pct = (worst_price - actual_entry) / actual_entry * lev * 100.0
+            else:
+                worst_price = high_price
+                worst_pnl_pct = (actual_entry - worst_price) / actual_entry * lev * 100.0
+            pnl_breached = (float_pct * 100.0 <= -max_trade_loss_pct) or (worst_pnl_pct <= -max_trade_loss_pct)
+            wick_breach = worst_pnl_pct <= -max_trade_loss_pct and (float_pct * 100.0 > -max_trade_loss_pct)
 
             if sig_type == "long":
                 if low_price <= sl or pnl_breached:
                     rem_ratio = 0.5 if t.get("tp1_partial_closed") else 1.0
-                    trigger_reason = f"双保险触发：价格 ${low_price} 触及/穿透止损线 ${sl}" if not pnl_breached else f"实际盈亏风控触发：浮动亏损率达 {round(float_pct * 100.0, 2)}% 触及风控阈值 -{max_trade_loss_pct}%"
+                    # Determine the precise trigger reason
+                    if low_price <= sl:
+                        trigger_reason = f"双保险触发：价格 ${low_price} 触及/穿透止损线 ${sl}"
+                    elif wick_breach:
+                        trigger_reason = f"影线风控触发：最低 ${low_price} 导致最坏浮亏 {round(worst_pnl_pct, 2)}% 触及风控阈值 -{max_trade_loss_pct}%（收盘价 ${current_price}）"
+                    else:
+                        trigger_reason = f"实际盈亏风控触发：浮动亏损率达 {round(float_pct * 100.0, 2)}% 触及风控阈值 -{max_trade_loss_pct}%"
                     if not self._try_live_close(t, symbol, "long", round(amount * rem_ratio, 4), reason=trigger_reason, alert_tag="sl", current_price=low_price):
                         updated = True
                         continue
@@ -2348,13 +2856,14 @@ class SniperEngine:
                     t["closed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     t["close_reason"] = trigger_reason
                     taker_fee, _, slippage = self._fee_rates()
-                    exit_price = current_price if pnl_breached else sl
+                    # Use the actual extreme price (low) as exit base to accurately reflect gap-through/slippage
+                    exit_price = low_price
                     exec_price = exit_price * (1 - slippage)
                     raw_pnl = amount * rem_ratio * (exec_price - actual_entry)
                     exit_fee = self._record_fee(t, pos_val * rem_ratio, taker_fee)
                     leg_net = round(raw_pnl - exit_fee, 2)
                     t["pnl_usd"] = round(t.get("pnl_usd", 0.0) + leg_net, 2)
-                    t["pnl_percent"] = round((t["pnl_usd"] / margin) * 100.0, 2)
+                    t["pnl_percent"] = round((t["pnl_usd"] / margin) * 100.0, 2) if margin > 0 else 0.0
                     if not t.get("is_live"):
                         cfg["paper_account_balance"] = round(cfg["paper_account_balance"] + leg_net, 2)
                     updated = True
@@ -2362,7 +2871,7 @@ class SniperEngine:
 
                     self._send_notification(
                         f"🛡️ 狙击风控触发离场：{symbol}",
-                        f"🛡️ *【风控平仓通知】*\n币种：{symbol} (LONG)\n平仓触发价：${low_price if not pnl_breached else current_price} | 止损线：${sl}\n实现盈亏：${t['pnl_usd']} USD ({t['pnl_percent']}%)\n原因：{t['close_reason']}"
+                        f"🛡️ *【风控平仓通知】*\n币种：{symbol} (LONG)\n平仓触发价：${low_price} | 止损线：${sl}\n实现盈亏：${t['pnl_usd']} USD ({t['pnl_percent']}%)\n原因：{t['close_reason']}"
                     )
                     continue
 
@@ -2370,12 +2879,18 @@ class SniperEngine:
                         and self._try_live_close(t, symbol, "long", round(amount * 0.5, 4), reason=f"双保险 TP1 (${tps[0]}) 止盈平仓 50%", alert_tag="tp1", current_price=high_price):
                     t["tp1_partial_closed"] = True
                     t["status"] = "tp1_hit"
-                    t["stop_loss"] = actual_entry
+                    # Move SL to breakeven, but NEVER move it backwards (trailing stop may have already moved it up)
+                    try:
+                        current_sl_f = float(t.get("stop_loss", actual_entry))
+                        t["stop_loss"] = max(actual_entry, current_sl_f)
+                    except (TypeError, ValueError):
+                        t["stop_loss"] = actual_entry
                     # Re-place protective SL on exchange for remaining 50% (cleanup inside _try_live_close removed it)
                     if t.get("is_live"):
-                        self._place_protective_sl_on_exchange(symbol, "long", actual_entry, round(amount * 0.5, 4))
-                    taker_fee, _, _ = self._fee_rates()
-                    part_pnl = amount * 0.5 * (tps[0] - actual_entry)
+                        self._place_protective_sl_on_exchange(symbol, "long", t["stop_loss"], round(amount * 0.5, 4))
+                    taker_fee, _, slippage = self._fee_rates()
+                    exec_tp1 = tps[0] * (1 - slippage)
+                    part_pnl = amount * 0.5 * (exec_tp1 - actual_entry)
                     exit_fee = self._record_fee(t, pos_val * 0.5, taker_fee)
                     part_net = round(part_pnl - exit_fee, 2)
                     t["pnl_usd"] = round(t.get("pnl_usd", 0.0) + part_net, 2)
@@ -2386,8 +2901,11 @@ class SniperEngine:
 
                     self._send_notification(
                         f"🎉 狙击 TP1 阶段止盈保本：{symbol}",
-                        f"🎉 *【阶段止盈 & 保本推损通知】*\n币种：{symbol} (LONG)\n触发价：${high_price} | 目标位 TP1：${tps[0]}\n已平仓 50% 浮盈落袋：+${part_net} USD（净额，已扣费）\n🛡️ *防守线已自动上移至建仓成本价 (${actual_entry})，已锁定无风险持仓！*"
+                        f"🎉 *【阶段止盈 & 保本推损通知】*\n币种：{symbol} (LONG)\n触发价：${high_price} | 目标位 TP1：${tps[0]}\n已平仓 50% 浮盈落袋：+${part_net} USD（净额，已扣费）\n🛡️ *防守线已上移至 ${t['stop_loss']}，剩余仓位零风险！*"
                     )
+                    # Skip ultimate TP check this tick to avoid race condition
+                    # (TP1 just placed exchange SL, immediate TP2 close would cancel it pointlessly)
+                    continue
 
                 max_tp = max(tps) if tps else 0
                 rem_factor = 0.5 if t.get("tp1_partial_closed") else 1.0
@@ -2397,8 +2915,9 @@ class SniperEngine:
                         continue
                     t["status"] = "closed_tp"
                     t["closed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    taker_fee, _, _ = self._fee_rates()
-                    rem_pnl = amount * rem_factor * (max_tp - actual_entry)
+                    taker_fee, _, slippage = self._fee_rates()
+                    exec_max_tp = max_tp * (1 - slippage)
+                    rem_pnl = amount * rem_factor * (exec_max_tp - actual_entry)
                     exit_fee = self._record_fee(t, pos_val * rem_factor, taker_fee)
                     rem_net = round(rem_pnl - exit_fee, 2)
                     t["pnl_usd"] = round(t.get("pnl_usd", 0.0) + rem_net, 2)
@@ -2416,7 +2935,13 @@ class SniperEngine:
             elif sig_type == "short":
                 if high_price >= sl or pnl_breached:
                     rem_ratio = 0.5 if t.get("tp1_partial_closed") else 1.0
-                    trigger_reason = f"双保险触发：价格 ${high_price} 触及/穿透止损线 ${sl}" if not pnl_breached else f"实际盈亏风控触发：浮动亏损率达 {round(float_pct * 100.0, 2)}% 触及风控阈值 -{max_trade_loss_pct}%"
+                    # Determine the precise trigger reason
+                    if high_price >= sl:
+                        trigger_reason = f"双保险触发：价格 ${high_price} 触及/穿透止损线 ${sl}"
+                    elif wick_breach:
+                        trigger_reason = f"影线风控触发：最高 ${high_price} 导致最坏浮亏 {round(worst_pnl_pct, 2)}% 触及风控阈值 -{max_trade_loss_pct}%（收盘价 ${current_price}）"
+                    else:
+                        trigger_reason = f"实际盈亏风控触发：浮动亏损率达 {round(float_pct * 100.0, 2)}% 触及风控阈值 -{max_trade_loss_pct}%"
                     if not self._try_live_close(t, symbol, "short", round(amount * rem_ratio, 4), reason=trigger_reason, alert_tag="sl", current_price=high_price):
                         updated = True
                         continue
@@ -2424,13 +2949,14 @@ class SniperEngine:
                     t["closed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     t["close_reason"] = trigger_reason
                     taker_fee, _, slippage = self._fee_rates()
-                    exit_price = current_price if pnl_breached else sl
+                    # Use the actual extreme price (high) as exit base to accurately reflect gap-through/slippage
+                    exit_price = high_price
                     exec_price = exit_price * (1 + slippage)
                     raw_pnl = amount * rem_ratio * (actual_entry - exec_price)
                     exit_fee = self._record_fee(t, pos_val * rem_ratio, taker_fee)
                     leg_net = round(raw_pnl - exit_fee, 2)
                     t["pnl_usd"] = round(t.get("pnl_usd", 0.0) + leg_net, 2)
-                    t["pnl_percent"] = round((t["pnl_usd"] / margin) * 100.0, 2)
+                    t["pnl_percent"] = round((t["pnl_usd"] / margin) * 100.0, 2) if margin > 0 else 0.0
                     if not t.get("is_live"):
                         cfg["paper_account_balance"] = round(cfg["paper_account_balance"] + leg_net, 2)
                     updated = True
@@ -2438,7 +2964,7 @@ class SniperEngine:
 
                     self._send_notification(
                         f"🛡️ 狙击风控触发离场：{symbol}",
-                        f"🛡️ *【风控平仓通知】*\n币种：{symbol} (SHORT)\n平仓触发价：${high_price if not pnl_breached else current_price} | 止损线：${sl}\n实现盈亏：${t['pnl_usd']} USD ({t['pnl_percent']}%)\n原因：{t['close_reason']}"
+                        f"🛡️ *【风控平仓通知】*\n币种：{symbol} (SHORT)\n平仓触发价：${high_price} | 止损线：${sl}\n实现盈亏：${t['pnl_usd']} USD ({t['pnl_percent']}%)\n原因：{t['close_reason']}"
                     )
                     continue
 
@@ -2446,12 +2972,18 @@ class SniperEngine:
                         and self._try_live_close(t, symbol, "short", round(amount * 0.5, 4), reason=f"双保险 TP1 (${tps[0]}) 止盈平仓 50%", alert_tag="tp1", current_price=low_price):
                     t["tp1_partial_closed"] = True
                     t["status"] = "tp1_hit"
-                    t["stop_loss"] = actual_entry
+                    # Move SL to breakeven, but NEVER move it backwards (trailing stop may have already moved it down)
+                    try:
+                        current_sl_f = float(t.get("stop_loss", actual_entry))
+                        t["stop_loss"] = min(actual_entry, current_sl_f)
+                    except (TypeError, ValueError):
+                        t["stop_loss"] = actual_entry
                     # Re-place protective SL on exchange for remaining 50% (cleanup inside _try_live_close removed it)
                     if t.get("is_live"):
-                        self._place_protective_sl_on_exchange(symbol, "short", actual_entry, round(amount * 0.5, 4))
-                    taker_fee, _, _ = self._fee_rates()
-                    part_pnl = amount * 0.5 * (actual_entry - tps[0])
+                        self._place_protective_sl_on_exchange(symbol, "short", t["stop_loss"], round(amount * 0.5, 4))
+                    taker_fee, _, slippage = self._fee_rates()
+                    exec_tp1 = tps[0] * (1 + slippage)
+                    part_pnl = amount * 0.5 * (actual_entry - exec_tp1)
                     exit_fee = self._record_fee(t, pos_val * 0.5, taker_fee)
                     part_net = round(part_pnl - exit_fee, 2)
                     t["pnl_usd"] = round(t.get("pnl_usd", 0.0) + part_net, 2)
@@ -2462,8 +2994,11 @@ class SniperEngine:
 
                     self._send_notification(
                         f"🎉 狙击 TP1 阶段止盈保本：{symbol}",
-                        f"🎉 *【阶段止盈 & 保本推损通知】*\n币种：{symbol} (SHORT)\n触发价：${low_price} | 目标位 TP1：${tps[0]}\n已平仓 50% 浮盈落袋：+${part_net} USD（净额，已扣费）\n🛡️ *防守线已自动上移至建仓成本价 (${actual_entry})，已锁定无风险持仓！*"
+                        f"🎉 *【阶段止盈 & 保本推损通知】*\n币种：{symbol} (SHORT)\n触发价：${low_price} | 目标位 TP1：${tps[0]}\n已平仓 50% 浮盈落袋：+${part_net} USD（净额，已扣费）\n🛡️ *防守线已下移至 ${t['stop_loss']}，剩余仓位零风险！*"
                     )
+                    # Skip ultimate TP check this tick to avoid race condition
+                    # (TP1 just placed exchange SL, immediate TP2 close would cancel it pointlessly)
+                    continue
 
                 min_tp = min(tps) if tps else 999999
                 rem_factor = 0.5 if t.get("tp1_partial_closed") else 1.0
@@ -2473,8 +3008,9 @@ class SniperEngine:
                         continue
                     t["status"] = "closed_tp"
                     t["closed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    taker_fee, _, _ = self._fee_rates()
-                    rem_pnl = amount * rem_factor * (actual_entry - min_tp)
+                    taker_fee, _, slippage = self._fee_rates()
+                    exec_min_tp = min_tp * (1 + slippage)
+                    rem_pnl = amount * rem_factor * (actual_entry - exec_min_tp)
                     exit_fee = self._record_fee(t, pos_val * rem_factor, taker_fee)
                     rem_net = round(rem_pnl - exit_fee, 2)
                     t["pnl_usd"] = round(t.get("pnl_usd", 0.0) + rem_net, 2)

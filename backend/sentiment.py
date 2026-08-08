@@ -14,6 +14,7 @@ it returns None/empty rather than crashing the pipeline.
 import logging
 import time
 import json
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List
 
@@ -92,15 +93,25 @@ def fetch_funding_rates(symbols: List[str], exchange_id: str = "binance") -> Opt
         return cached
 
     try:
-        from data_fetcher import get_data_fetcher
-    except ImportError:
-        from backend.data_fetcher import get_data_fetcher
+        import ccxt
 
-    try:
-        fetcher = get_data_fetcher(exchange_id)
-        exchange = fetcher.exchanges.get(exchange_id) or fetcher.exchanges.get("binance")
-        if not exchange:
-            return None
+        # Create a dedicated futures/swap exchange instance for funding rate queries.
+        # The data_fetcher uses 'spot' type, which cannot reliably fetch funding rates.
+        proxy_url = os.environ.get("HTTP_PROXY") or os.environ.get("HTTPS_PROXY") or os.environ.get("http_proxy") or os.environ.get("https_proxy")
+        config = {
+            'enableRateLimit': True,
+            'timeout': 5000,
+            'options': {
+                'defaultType': 'future',
+            }
+        }
+        if proxy_url:
+            config['proxies'] = {
+                'http': proxy_url,
+                'https': proxy_url
+            }
+        ex_class = getattr(ccxt, exchange_id)
+        exchange = ex_class(config)
 
         rates = {}
         for symbol in symbols:

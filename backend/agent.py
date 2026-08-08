@@ -52,8 +52,8 @@ class FeiyangAgent:
         self._system_prompt = system_prompt
         self.root_dir = root_dir
         
-        # Dynamically load min_confidence from trades.json config block, fallback to 6
-        self.min_confidence = 6
+        # Dynamically load min_confidence from trades.json config block, fallback to 7
+        self.min_confidence = 7
         if root_dir:
             trades_path = os.path.join(root_dir, "trades.json")
             if os.path.exists(trades_path):
@@ -481,32 +481,82 @@ JSON 结构及字段定义：
 
         # Safety net: LLM said "wait" but score >= threshold AND provided valid trade geometry
         # This catches the contradiction where the report describes a trade but JSON says wait
-        # BUT: do NOT override if a legitimate hard filter (R:R < 1.5) blocked the signal
+        # BUT: do NOT override if a legitimate hard filter (R:R < 1.8) blocked the signal
+        #      or if macro event risk control / market bias says stand aside
+        #      or if Fear & Greed / Funding rate extremes would be violated
         if signal["signal_type"] == "wait" and signal["confidence_score"] >= self.min_confidence:
-            entry_zone = signal.get("entry_zone", {}) or {}
-            entry_min = entry_zone.get("min", 0)
-            entry_max = entry_zone.get("max", 0)
-            sl = signal.get("stop_loss", 0)
-            tps = signal.get("take_profit_targets", []) or []
-            tp1 = tps[0] if tps else 0
-            rr = float(signal.get("risk_reward_ratio", 0) or 0)
+            # Check macro event risk control: do NOT override if market context says stand aside
+            # or if a macro event is imminent (within 2 hours)
+            market_ctx = signal.get("market_context") or {}
+            trading_bias = market_ctx.get("trading_bias", "normal")
+            macro_event = market_ctx.get("macro_event")
+            should_stand_aside = (
+                trading_bias == "stand_aside"
+                or (macro_event and abs(macro_event.get("hours_until", 999)) < 2)
+            )
 
-            # Check if there's valid non-zero trade geometry AND R:R passes the hard filter
-            if entry_min > 0 and entry_max > 0 and sl > 0 and tp1 > 0 and rr >= 1.8:
-                if sl < entry_min and tp1 > entry_max:
-                    signal["signal_type"] = "long"
-                    logger.warning(
-                        f"[ConsistencyFix] LLM output wait with score {signal['confidence_score']} "
-                        f"but valid long geometry (SL={sl} < entry={entry_min}-{entry_max} < TP={tp1}, R:R={rr}). "
-                        f"Overriding to LONG."
-                    )
-                elif sl > entry_max and tp1 < entry_min:
-                    signal["signal_type"] = "short"
-                    logger.warning(
-                        f"[ConsistencyFix] LLM output wait with score {signal['confidence_score']} "
-                        f"but valid short geometry (SL={sl} > entry={entry_min}-{entry_max} > TP={tp1}, R:R={rr}). "
-                        f"Overriding to SHORT."
-                    )
+            # Check Fear & Greed extreme: > 85 blocks LONG, < 15 blocks SHORT
+            fear_greed = market_ctx.get("fear_greed") or {}
+            fng_value = fear_greed.get("value")
+            fng_blocks_long = fng_value is not None and fng_value > 85
+            fng_blocks_short = fng_value is not None and fng_value < 15
+
+            # Check Funding rate extreme: > 0.05% blocks LONG, < -0.05% blocks SHORT
+            funding_rates = market_ctx.get("funding_rates") or {}
+            symbol_str = signal.get("symbol", "")
+            sym_fr = funding_rates.get(symbol_str)
+            fr_blocks_long = sym_fr is not None and sym_fr > 0.0005
+            fr_blocks_short = sym_fr is not None and sym_fr < -0.0005
+
+            if not should_stand_aside:
+                entry_zone = signal.get("entry_zone", {}) or {}
+                entry_min = entry_zone.get("min", 0)
+                entry_max = entry_zone.get("max", 0)
+                sl = signal.get("stop_loss", 0)
+                tps = signal.get("take_profit_targets", []) or []
+                tp1 = tps[0] if tps else 0
+                rr = float(signal.get("risk_reward_ratio", 0) or 0)
+
+                # Check if there's valid non-zero trade geometry AND R:R passes the hard filter
+                if entry_min > 0 and entry_max > 0 and sl > 0 and tp1 > 0 and rr >= 1.8:
+                    if sl < entry_min and tp1 > entry_max:
+                        # LONG override: check fear_greed and funding rate hard filters
+                        if fng_blocks_long or fr_blocks_long:
+                            block_reasons = []
+                            if fng_blocks_long:
+                                block_reasons.append(f"Fear&Greed={fng_value} > 85")
+                            if fr_blocks_long:
+                                block_reasons.append(f"FundingRate={sym_fr} > 0.05%")
+                            logger.info(
+                                f"[ConsistencyFix] LONG override BLOCKED by hard filter: {', '.join(block_reasons)}. "
+                                f"Keeping WAIT."
+                            )
+                        else:
+                            signal["signal_type"] = "long"
+                            logger.warning(
+                                f"[ConsistencyFix] LLM output wait with score {signal['confidence_score']} "
+                                f"but valid long geometry (SL={sl} < entry={entry_min}-{entry_max} < TP={tp1}, R:R={rr}). "
+                                f"Overriding to LONG."
+                            )
+                    elif sl > entry_max and tp1 < entry_min:
+                        # SHORT override: check fear_greed and funding rate hard filters
+                        if fng_blocks_short or fr_blocks_short:
+                            block_reasons = []
+                            if fng_blocks_short:
+                                block_reasons.append(f"Fear&Greed={fng_value} < 15")
+                            if fr_blocks_short:
+                                block_reasons.append(f"FundingRate={sym_fr} < -0.05%")
+                            logger.info(
+                                f"[ConsistencyFix] SHORT override BLOCKED by hard filter: {', '.join(block_reasons)}. "
+                                f"Keeping WAIT."
+                            )
+                        else:
+                            signal["signal_type"] = "short"
+                            logger.warning(
+                                f"[ConsistencyFix] LLM output wait with score {signal['confidence_score']} "
+                                f"but valid short geometry (SL={sl} > entry={entry_min}-{entry_max} > TP={tp1}, R:R={rr}). "
+                                f"Overriding to SHORT."
+                            )
 
         return signal
 
@@ -602,7 +652,7 @@ JSON 结构及字段定义：
                 final_report = report_1
 
             # Average the confidence scores for a more conservative estimate
-            avg_conf = (signal_1.get("confidence_score", 0) + signal_2.get("confidence_score", 0)) // 2
+            avg_conf = round((signal_1.get("confidence_score", 0) + signal_2.get("confidence_score", 0)) / 2)
             final_signal["confidence_score"] = avg_conf
             final_signal["consensus"] = True
             # Sync the report's 合计 row to match the consensus-adjusted score
@@ -618,7 +668,7 @@ JSON 结构及字段定义：
             conf_2 = signal_2.get("confidence_score", 0)
             max_conf = max(conf_1, conf_2)
 
-            if max_conf >= 7:
+            if max_conf >= self.min_confidence + 1:
                 # One call is highly confident — trust it (reduce score slightly for uncertainty)
                 if conf_1 >= conf_2:
                     final_signal = signal_1
@@ -626,10 +676,18 @@ JSON 结构及字段定义：
                 else:
                     final_signal = signal_2
                     final_report = report_2
-                final_signal["confidence_score"] = max_conf - 1  # Penalize 1 point for lack of consensus
+                penalized_conf = max_conf - 1  # Penalize 1 point for lack of consensus
+                final_signal["confidence_score"] = penalized_conf
                 final_signal["consensus"] = False
+                # Safety: if penalized score drops below min_confidence, force wait
+                if penalized_conf < self.min_confidence:
+                    logger.info(
+                        f"[Consensus] DISAGREEMENT: penalized conf {penalized_conf} < min_confidence {self.min_confidence}, "
+                        f"forcing wait."
+                    )
+                    final_signal["signal_type"] = "wait"
                 # Sync the report's 合计 row to match the penalized score
-                final_report = re.sub(r"(合计[^\d]*)\d+(\s*/\s*12)", rf"\g<1>{max_conf - 1}\2", final_report)
+                final_report = re.sub(r"(合计[^\d]*)\d+(\s*/\s*12)", rf"\g<1>{penalized_conf}\2", final_report)
                 logger.info(
                     f"[Consensus] DISAGREEMENT but high-confidence override: "
                     f"call1={sig_type_1}(conf={conf_1}) vs call2={sig_type_2}(conf={conf_2}) "
@@ -640,7 +698,7 @@ JSON 结构及字段定义：
             # Both calls low confidence → force wait
             logger.info(
                 f"[Consensus] DISAGREEMENT: call1={sig_type_1}(conf={conf_1}) vs call2={sig_type_2}(conf={conf_2}) "
-                f"→ both below 7, forcing wait. Ambiguous market conditions."
+                f"→ both below {self.min_confidence + 1}, forcing wait. Ambiguous market conditions."
             )
             wait_signal = {
                 "symbol": payload.get("symbol", "UNKNOWN"),
