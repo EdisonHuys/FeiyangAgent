@@ -722,3 +722,145 @@ JSON 结构及字段定义：
                 f"---\n*以下为第一次诊断参考：*\n\n{report_1}"
             )
             return wait_signal, combined_report
+
+    def quick_confirm(self, payload):
+        """
+        Lightweight re-diagnosis for pending trades approaching the entry zone.
+        Asks the LLM whether the original signal direction is still valid given
+        the current market structure.
+
+        This is a cheaper, focused call compared to the full analyze() — it
+        sends a compact prompt and expects a simple "keep / cancel / reverse"
+        result instead of the full 12-point scoring system.
+
+        Args:
+            payload: dict with keys:
+                - "symbol": str
+                - "current_price": float
+                - "original_signal_type": "long" or "short"
+                - "entry_min": float
+                - "entry_max": float
+                - "stop_loss": float
+                - "take_profit_targets": [float, ...]
+                - "core_reason": str (original signal reasoning)
+                - "signal_regime": str (original market regime)
+                - "market_data": dict or None (optional, compact OHLCV data if available)
+
+        Returns:
+            dict with keys:
+                - "action": "keep" | "cancel" | "reverse"
+                - "new_signal_type": "long" or "short" (only if action == "reverse")
+                - "new_entry_min": float (optional)
+                - "new_entry_max": float (optional)
+                - "new_stop_loss": float (optional)
+                - "new_take_profit_targets": [float, ...] (optional)
+                - "reason": str (LLM explanation)
+                - "confidence": int (0-12, how confident the LLM is in this re-diagnosis)
+        """
+        symbol = payload.get("symbol", "UNKNOWN")
+        current_price = payload.get("current_price", 0.0)
+        original_sig = payload.get("original_signal_type", "wait")
+        entry_min = payload.get("entry_min", 0.0)
+        entry_max = payload.get("entry_max", 0.0)
+        stop_loss = payload.get("stop_loss", 0.0)
+        tps = payload.get("take_profit_targets", [])
+        core_reason = payload.get("core_reason", "")
+        signal_regime = payload.get("signal_regime", "unknown")
+
+        # Build a compact re-diagnosis prompt
+        quick_prompt = (
+            f"【再诊断请求】{symbol} 当前价格 ${current_price}\n\n"
+            f"原始信号：{original_sig.upper()}\n"
+            f"原始依据：{core_reason}\n"
+            f"原始市场状态：{signal_regime}\n"
+            f"吃单区间：${entry_min} - ${entry_max}（当前价距区间中心 {abs(current_price - (entry_min + entry_max) / 2.0) / ((entry_min + entry_max) / 2.0) * 100.0:.2f}%）\n"
+            f"止损线：${stop_loss}\n"
+            f"止盈目标：{', '.join([f'${t}' for t in tps])}\n\n"
+            f"请快速判断：当前价格已接近吃单区间，原始信号的方向是否仍然有效？\n\n"
+            f"请严格按以下 JSON 格式输出（不要加 Markdown 代码块标记）：\n"
+            f"{{\n"
+            f'  "action": "keep" | "cancel" | "reverse",\n'
+            f'  "new_signal_type": "long" | "short"（仅当 action 为 reverse 时必须填）,\n'
+            f'  "new_entry_min": <optional float>,\n'
+            f'  "new_entry_max": <optional float>,\n'
+            f'  "new_stop_loss": <optional float>,\n'
+            f'  "new_take_profit_targets": [<optional float>, ...],\n'
+            f'  "reason": "简短的中文理由，说明为什么 keep / cancel / reverse",\n'
+            f'  "confidence": <int 0-12, 本次再诊断的置信度>\n'
+            f"}}\n\n"
+            f"注意：不要输出任何其他内容，只需输出纯 JSON 对象。"
+        )
+
+        logger.info(f"[QuickConfirm] Sending re-diagnosis request for {symbol} (original={original_sig})...")
+
+        # Use a lower temperature for more deterministic output
+        original_temp = self.temperature
+        self.temperature = min(0.1, original_temp)
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "你是一个专业的加密货币交易再诊断助手。你的任务是快速判断一个已有交易信号在当前市场条件下是否仍然有效。\n"
+                            "你的判断标准：\n"
+                            "1. keep - 原始方向仍然有效，市场结构未发生根本性变化\n"
+                            "2. cancel - 原始方向已失效，市场结构已变化，不应入场\n"
+                            "3. reverse - 原始方向判断错误，当前市场结构支持相反方向\n\n"
+                            "注意：默认情况下应倾向于 keep，除非有明确的证据表明市场结构发生了根本性变化。"
+                        )
+                    },
+                    {"role": "user", "content": quick_prompt}
+                ],
+                temperature=self.temperature,
+                max_tokens=500
+            )
+
+            content = response.choices[0].message.content.strip()
+
+            # Parse the JSON response (handle both pure JSON and codeblock-wrapped)
+            import re as _re
+            json_match = _re.search(r"```(?:json)?\s*\n?(.*?)\n?\s*```", content, _re.DOTALL)
+            if json_match:
+                json_str = json_match.group(1)
+            else:
+                json_str = content
+
+            # Sanitize common JSON issues
+            json_str = _re.sub(r",\s*([}\]])", r"\1", json_str)
+            json_str = _re.sub(r"//.*?\n", "\n", json_str)
+
+            result = json.loads(json_str)
+
+            # Validate the result
+            action = result.get("action", "keep")
+            if action not in ("keep", "cancel", "reverse"):
+                logger.warning(f"[QuickConfirm] Unknown action '{action}', defaulting to keep.")
+                result["action"] = "keep"
+
+            if action == "reverse" and not result.get("new_signal_type"):
+                logger.warning("[QuickConfirm] Reverse action missing new_signal_type, defaulting to keep.")
+                result["action"] = "keep"
+
+            # Ensure reason is present
+            if not result.get("reason"):
+                result["reason"] = "LLM 再诊断后未提供详细理由"
+
+            # Ensure confidence is present
+            result.setdefault("confidence", 5)
+
+            logger.info(f"[QuickConfirm] Result for {symbol}: {result['action']} (conf={result['confidence']}) - {result['reason']}")
+            return result
+
+        except Exception as e:
+            logger.error(f"[QuickConfirm] LLM re-diagnosis failed for {symbol}: {e}")
+            # On failure, default to keep (be conservative — don't cancel a trade on API error)
+            return {
+                "action": "keep",
+                "reason": f"再诊断 API 调用失败（{e}），保守起见维持原方向",
+                "confidence": 0
+            }
+        finally:
+            self.temperature = original_temp

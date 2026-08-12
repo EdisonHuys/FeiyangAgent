@@ -94,7 +94,14 @@ class SniperEngine:
                     "ZAMA/USDT": 1.6
                 },
                 # Per-trade max loss as % of margin before force-close
-                "max_trade_loss_percent": 50.0
+                "max_trade_loss_percent": 50.0,
+                # ⏰ Signal freshness: pending orders older than this are auto-cancelled
+                # Shorter than pending_ttl_hours because a stale signal is unreliable
+                "signal_freshness_hours": 4.0,
+                # 🔍 Re-diagnosis: when price is within this % of entry zone, trigger review
+                "pending_review_distance_pct": 5.0,
+                # ⏱️ Re-diagnosis cooldown: minimum minutes between reviews for same trade
+                "pending_review_cooldown_min": 30.0
             },
             "trades": []
         }
@@ -2282,7 +2289,12 @@ class SniperEngine:
             "live_order_id": None,
             "live_exchange": cfg.get("live_exchange", "binance") if mode == "live" else None,
             "protective_sl_order_id": None,
-            "fees_usd": 0.0
+            "fees_usd": 0.0,
+            "core_reason": json_signal.get("core_reason", ""),
+            "signal_regime": json_signal.get("market_regime", "unknown"),
+            "needs_review": False,
+            "last_review_time": None,
+            "review_trigger_price": None
         }
 
         if instant_fill and not new_trade.get("is_live"):
@@ -2671,6 +2683,64 @@ class SniperEngine:
                         updated = True
                         logger.info(f"[SniperEngine] Pending order for {symbol} expired after {round(age_hours, 1)}h.")
                         continue
+
+                # ⏰ Signal freshness: cancel pending orders whose signal is too old
+                # Shorter than pending_ttl_hours — a stale signal is unreliable even if the
+                # order hasn't expired yet. The market structure that generated the original
+                # signal may have shifted, making the original direction invalid.
+                freshness_hours = float(cfg.get("signal_freshness_hours", 4.0))
+                if freshness_hours > 0 and ttl_hours > 0 and freshness_hours < ttl_hours:
+                    try:
+                        entered_dt = datetime.strptime(t.get("entered_at", ""), "%Y-%m-%d %H:%M:%S")
+                        age_hours = (datetime.now() - entered_dt).total_seconds() / 3600.0
+                    except Exception:
+                        age_hours = 0.0
+                    if age_hours > freshness_hours:
+                        if t.get("is_live") and t.get("live_order_id"):
+                            try:
+                                exchange, ex_id = self._init_live_ccxt()
+                                ccxt_symbol = f"{symbol}:USDT" if ":" not in symbol else symbol
+                                exchange.cancel_order(t["live_order_id"], ccxt_symbol)
+                                logger.info(f"[LiveSniper] Signal freshness cancel issued for {symbol} after {round(age_hours, 1)}h (freshness={freshness_hours}h).")
+                            except Exception as e:
+                                logger.warning(f"[LiveSniper] Signal freshness cancel failed for {symbol}: {e} — 保留挂单，下一 tick 重试")
+                                continue
+                        t["status"] = "cancelled"
+                        t["close_reason"] = f"⏰ 信号时效性过期（{int(age_hours)}h > {int(freshness_hours)}h），市场结构可能已变化，自动撤单等待新信号"
+                        updated = True
+                        logger.info(f"[SniperEngine] Signal freshness expired for {symbol}: {round(age_hours, 1)}h > {freshness_hours}h.")
+                        continue
+
+                # 🔍 Re-diagnosis: when price approaches the entry zone, flag the
+                # pending trade for LLM review. The market structure may have
+                # shifted since the original signal was generated, and the
+                # original direction might no longer be valid.
+                review_distance_pct = float(cfg.get("pending_review_distance_pct", 5.0))
+                review_cooldown_min = float(cfg.get("pending_review_cooldown_min", 30.0))
+                if review_distance_pct > 0:
+                    # Calculate how close the current price is to the entry zone
+                    entry_center = (entry_min + entry_max) / 2.0
+                    entry_dist_pct = abs(current_price - entry_center) / entry_center * 100.0
+                    if entry_dist_pct <= review_distance_pct:
+                        # Price is within the review distance — check cooldown
+                        last_review = t.get("last_review_time")
+                        needs_review = True
+                        if last_review:
+                            try:
+                                last_review_dt = datetime.strptime(str(last_review), "%Y-%m-%d %H:%M:%S")
+                                mins_since_review = (datetime.now() - last_review_dt).total_seconds() / 60.0
+                                if mins_since_review < review_cooldown_min:
+                                    needs_review = False
+                            except Exception:
+                                pass
+                        if needs_review:
+                            t["needs_review"] = True
+                            t["review_trigger_price"] = current_price
+                            logger.info(
+                                f"[SniperEngine] [{symbol}] Price within {round(entry_dist_pct, 2)}% of entry zone "
+                                f"(center=${entry_center}), flagged for re-diagnosis. "
+                                f"Current price=${current_price}"
+                            )
 
                 # Realistic limit-order semantics:
                 # - a resting limit fills ONLY when price reaches planned_entry
@@ -3080,3 +3150,203 @@ class SniperEngine:
 
         if updated:
             self._save_state()
+
+    # ─── Signal freshness & re-diagnosis API ──────────────────────────
+
+    def get_pending_trades_needing_review(self, prices_dict=None):
+        """
+        Return a list of pending trades that have been flagged for LLM re-diagnosis
+        (needs_review == True). Used by the background re-diagnosis thread in app.py
+        to decide which trades need a fresh LLM opinion before entry.
+
+        When prices_dict is provided, also opportunistically flags trades whose
+        current price is within the review distance of the entry zone.
+
+        Returns:
+            List[dict]: trade records with needs_review=True, each with a
+                        'review_trigger_price' key showing the price that triggered.
+        """
+        with self._lock:
+            cfg = self.state.get("config", {})
+            mode = cfg.get("mode", "paper")
+            if mode == "off":
+                return []
+
+            # Optionally flag pending trades based on current prices
+            if prices_dict:
+                for t in self.state.get("trades", []):
+                    if t["status"] != "pending":
+                        continue
+                    symbol = t["symbol"]
+                    current_price = prices_dict.get(symbol)
+                    if current_price is None:
+                        continue
+                    if isinstance(current_price, dict):
+                        current_price = float(current_price.get("close", 0.0))
+                    else:
+                        current_price = float(current_price)
+                    if current_price <= 0:
+                        continue
+
+                    entry_min = t.get("entry_min", 0.0)
+                    entry_max = t.get("entry_max", 0.0)
+                    if entry_min <= 0 or entry_max <= 0:
+                        continue
+
+                    review_distance_pct = float(cfg.get("pending_review_distance_pct", 5.0))
+                    if review_distance_pct <= 0:
+                        continue
+
+                    entry_center = (entry_min + entry_max) / 2.0
+                    entry_dist_pct = abs(current_price - entry_center) / entry_center * 100.0
+
+                    if entry_dist_pct <= review_distance_pct:
+                        # Check cooldown
+                        last_review = t.get("last_review_time")
+                        review_cooldown_min = float(cfg.get("pending_review_cooldown_min", 30.0))
+                        needs_review = True
+                        if last_review:
+                            try:
+                                last_review_dt = datetime.strptime(str(last_review), "%Y-%m-%d %H:%M:%S")
+                                mins_since = (datetime.now() - last_review_dt).total_seconds() / 60.0
+                                if mins_since < review_cooldown_min:
+                                    needs_review = False
+                            except Exception:
+                                pass
+                        if needs_review:
+                            t["needs_review"] = True
+                            t["review_trigger_price"] = current_price
+                            logger.info(
+                                f"[SniperEngine] [{symbol}] get_pending_trades_needing_review: "
+                                f"price within {round(entry_dist_pct, 2)}% of entry zone, flagged."
+                            )
+
+            # Collect all pending trades that need review
+            reviews = []
+            for t in self.state.get("trades", []):
+                if t["status"] == "pending" and t.get("needs_review"):
+                    reviews.append({
+                        "trade_id": t.get("trade_id", ""),
+                        "symbol": t["symbol"],
+                        "signal_type": t["signal_type"],
+                        "entry_min": t["entry_min"],
+                        "entry_max": t["entry_max"],
+                        "planned_entry": t["planned_entry"],
+                        "stop_loss": t["stop_loss"],
+                        "take_profit_targets": t.get("take_profit_targets", []),
+                        "current_price": t.get("review_trigger_price", t.get("current_price", 0.0)),
+                        "core_reason": t.get("core_reason", ""),
+                        "signal_regime": t.get("signal_regime", "unknown"),
+                        "entered_at": t.get("entered_at", ""),
+                        "leverage": t.get("leverage", 0),
+                        "margin_usd": t.get("margin_usd", 0.0),
+                    })
+
+            return reviews
+
+    def apply_review_result(self, trade_id, review_result):
+        """
+        Apply the result of an LLM re-diagnosis to a pending trade.
+
+        Args:
+            trade_id: The trade_id of the pending trade to modify.
+            review_result: dict with keys:
+                - "action": "keep" | "cancel" | "reverse"
+                - "new_signal_type": "long" or "short" (only for "reverse")
+                - "new_entry_min": float (optional, for reverse)
+                - "new_entry_max": float (optional, for reverse)
+                - "new_stop_loss": float (optional)
+                - "new_take_profit_targets": list (optional)
+                - "reason": str (explanation from LLM)
+
+        Returns:
+            dict with "success": bool and "message": str
+        """
+        with self._lock:
+            action = review_result.get("action", "keep")
+            trades = self.state.get("trades", [])
+            target = None
+            for t in trades:
+                if t.get("trade_id") == trade_id and t["status"] == "pending":
+                    target = t
+                    break
+
+            if target is None:
+                return {"success": False, "message": f"Trade {trade_id} not found or not in pending state."}
+
+            reason = review_result.get("reason", "LLM 再诊断后未提供理由")
+            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+            # Reset the review flag regardless of action
+            target["needs_review"] = False
+            target["last_review_time"] = now_str
+
+            if action == "cancel":
+                # Cancel the pending trade
+                if target.get("is_live") and target.get("live_order_id"):
+                    try:
+                        exchange, ex_id = self._init_live_ccxt()
+                        ccxt_symbol = f"{target['symbol']}:USDT" if ":" not in target['symbol'] else target['symbol']
+                        exchange.cancel_order(target["live_order_id"], ccxt_symbol)
+                        logger.info(f"[SniperEngine] Re-diagnosis cancel issued for {target['symbol']} (live order).")
+                    except Exception as e:
+                        logger.warning(f"[SniperEngine] Re-diagnosis cancel failed for {target['symbol']}: {e}")
+
+                target["status"] = "cancelled"
+                target["close_reason"] = f"🔍 LLM 再诊断后取消：{reason}"
+                self._save_state()
+                logger.info(f"[SniperEngine] Re-diagnosis cancelled trade {trade_id} ({target['symbol']}): {reason}")
+                return {"success": True, "message": f"Trade cancelled: {reason}"}
+
+            elif action == "reverse":
+                # Reverse the direction of the pending trade
+                new_sig_type = review_result.get("new_signal_type", "").lower()
+                if new_sig_type not in ("long", "short"):
+                    return {"success": False, "message": "Reverse action requires a valid new_signal_type (long/short)."}
+                if new_sig_type == target["signal_type"]:
+                    return {"success": False, "message": f"Reverse requested but new_signal_type ({new_sig_type}) matches original. Use 'keep' instead."}
+
+                old_sig_type = target["signal_type"]
+                target["signal_type"] = new_sig_type
+
+                # Update price targets if provided
+                new_min = review_result.get("new_entry_min")
+                new_max = review_result.get("new_entry_max")
+                if new_min is not None and new_max is not None:
+                    target["entry_min"] = float(new_min)
+                    target["entry_max"] = float(new_max)
+                    target["planned_entry"] = (float(new_min) + float(new_max)) / 2.0
+
+                new_sl = review_result.get("new_stop_loss")
+                if new_sl is not None:
+                    target["stop_loss"] = float(new_sl)
+
+                new_tps = review_result.get("new_take_profit_targets")
+                if new_tps and isinstance(new_tps, list):
+                    target["take_profit_targets"] = [float(x) for x in new_tps]
+
+                # Recalculate position params
+                try:
+                    balance = self._current_balance()
+                    risk_pct = float(self.state.get("config", {}).get("risk_per_trade_percent", 2.0))
+                    planned_entry = target["planned_entry"]
+                    sl = target["stop_loss"]
+                    confidence = 7  # conservative default after reversal
+                    # Recalculate trade params
+                    new_params = self.calculate_trade_params(balance, risk_pct, planned_entry, sl, confidence)
+                    target["position_size_usd"] = new_params.get("position_size", target["position_size_usd"])
+                    target["margin_usd"] = new_params.get("margin", target["margin_usd"])
+                    target["leverage"] = new_params.get("leverage", target["leverage"])
+                except Exception as calc_e:
+                    logger.warning(f"[SniperEngine] Re-diagnosis recalc failed for {trade_id}: {calc_e}")
+
+                target["close_reason"] = f"🔍 LLM 再诊断后反转方向：{old_sig_type.upper()} → {new_sig_type.upper()}，{reason}"
+                self._save_state()
+                logger.info(f"[SniperEngine] Re-diagnosis reversed trade {trade_id} ({target['symbol']}): {old_sig_type} -> {new_sig_type}")
+                return {"success": True, "message": f"Trade reversed {old_sig_type.upper()} → {new_sig_type.upper()}: {reason}"}
+
+            else:  # "keep" — proceed with the original plan
+                target["close_reason"] = f"🔍 LLM 再诊断后确认方向不变：{reason}"
+                self._save_state()
+                logger.info(f"[SniperEngine] Re-diagnosis confirmed trade {trade_id} ({target['symbol']}): {reason}")
+                return {"success": True, "message": f"Trade confirmed: {reason}"}

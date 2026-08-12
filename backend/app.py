@@ -1461,6 +1461,135 @@ def start_background_monitor():
                 log_monitor_event(f"⚠️ [盯盘异常] 异常信息：{str(e)}")
                 time.sleep(30)
 
+    # 3. Thread 3: Re-diagnosis Loop — checks pending trades approaching entry zone
+    # and asks the LLM for a quick confirmation before the trade fills.
+    def re_diagnosis_loop():
+        time.sleep(30)  # Give the system time to initialize
+        logger.info("Re-diagnosis Loop started.")
+        while True:
+            try:
+                yaml_cfg = load_yaml_config()
+                sniper_cfg = sniper_engine.get_config()
+                sniper_mode = sniper_cfg.get("mode", "off")
+                if sniper_mode == "off":
+                    time.sleep(30)
+                    continue
+
+                load_dotenv(ENV_PATH, override=True)
+                api_key = os.getenv("OPENAI_API_KEY")
+                if not api_key:
+                    time.sleep(30)
+                    continue
+
+                # Check for pending trades needing review
+                # Use the last prices from the fast price check loop
+                trades_needing_review = sniper_engine.get_pending_trades_needing_review()
+                if not trades_needing_review:
+                    time.sleep(15)
+                    continue
+
+                for trade in trades_needing_review:
+                    try:
+                        symbol = trade["symbol"]
+                        current_price = trade.get("current_price", 0.0)
+                        if current_price <= 0:
+                            continue
+
+                        log_monitor_event(f"🔍 [再诊断] {symbol} 价格接近吃单区间（${current_price}），启动 LLM 快速再诊断...")
+
+                        # Fetch fresh market data for the re-diagnosis
+                        exchange_id = yaml_cfg.get("exchange", "binance")
+                        fetcher = get_data_fetcher(exchange_id)
+                        timeframes = yaml_cfg.get("timeframes", ["1M", "1W", "1D", "4h", "1h"])
+                        try:
+                            raw_dfs = fetcher.fetch_all_timeframes(symbol, timeframes, limit=100)
+                            processed_dfs = {}
+                            for tf, df in raw_dfs.items():
+                                processed_dfs[tf] = calculate_indicators(df)
+                        except Exception as fetch_e:
+                            logger.warning(f"[ReDiagnosis] Failed to fetch data for {symbol}: {fetch_e}")
+                            processed_dfs = {}
+
+                        # Build compact market data for quick_confirm
+                        # Use the most recent 4h candles if available
+                        market_data = None
+                        try:
+                            if "4h" in processed_dfs:
+                                df_4h = processed_dfs["4h"]
+                                recent_4h = df_4h.tail(5)
+                                market_data = {
+                                    "close": recent_4h["close"].tolist() if "close" in recent_4h else [],
+                                    "high": recent_4h["high"].tolist() if "high" in recent_4h else [],
+                                    "low": recent_4h["low"].tolist() if "low" in recent_4h else [],
+                                    "volume": recent_4h["volume"].tolist() if "volume" in recent_4h else [],
+                                    "rsi": recent_4h["RSI_14"].tolist() if "RSI_14" in recent_4h else [],
+                                    "ma5": recent_4h["MA5"].tolist() if "MA5" in recent_4h else [],
+                                }
+                        except Exception as md_e:
+                            logger.warning(f"[ReDiagnosis] Failed to build market_data for {symbol}: {md_e}")
+
+                        # Build the re-diagnosis payload
+                        re_diag_payload = {
+                            "symbol": symbol,
+                            "current_price": current_price,
+                            "original_signal_type": trade["signal_type"],
+                            "entry_min": trade["entry_min"],
+                            "entry_max": trade["entry_max"],
+                            "stop_loss": trade["stop_loss"],
+                            "take_profit_targets": trade.get("take_profit_targets", []),
+                            "core_reason": trade.get("core_reason", ""),
+                            "signal_regime": trade.get("signal_regime", "unknown"),
+                            "market_data": market_data,
+                        }
+
+                        # Call the LLM for quick re-diagnosis
+                        llm_cfg = yaml_cfg.get("llm", {})
+                        model_name = llm_cfg.get("model", "gpt-4o")
+                        temperature = llm_cfg.get("temperature", 0.1)
+                        max_tokens = llm_cfg.get("max_tokens", 3000)
+
+                        agent = FeiyangAgent(
+                            api_key=api_key,
+                            api_base=os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1"),
+                            model_name=model_name,
+                            temperature=temperature,
+                            max_tokens=max_tokens,
+                            system_prompt=load_system_prompt(data_dir),
+                            root_dir=data_dir
+                        )
+
+                        review_result = agent.quick_confirm(re_diag_payload)
+                        logger.info(f"[ReDiagnosis] {symbol} review result: {review_result}")
+
+                        # Apply the result
+                        result = sniper_engine.apply_review_result(trade["trade_id"], review_result)
+                        logger.info(f"[ReDiagnosis] {symbol} apply result: {result}")
+
+                        # Notify user
+                        action = review_result.get("action", "keep")
+                        reason = review_result.get("reason", "")
+                        if action == "cancel":
+                            log_monitor_event(f"❌ [再诊断] {symbol} {trade['signal_type'].upper()} 信号被取消：{reason}")
+                        elif action == "reverse":
+                            new_sig = review_result.get("new_signal_type", "unknown")
+                            log_monitor_event(f"🔄 [再诊断] {symbol} 方向反转：{trade['signal_type'].upper()} → {new_sig.upper()}：{reason}")
+                        else:
+                            log_monitor_event(f"✅ [再诊断] {symbol} {trade['signal_type'].upper()} 方向确认保持不变：{reason}")
+
+                    except Exception as trade_e:
+                        logger.error(f"[ReDiagnosis] Error processing trade {trade.get('trade_id', '?')}: {trade_e}")
+                        log_monitor_event(f"⚠️ [再诊断] {trade.get('symbol', '?')} 处理异常：{trade_e}")
+
+                    # Cooldown between re-diagnosis calls (avoid rate limits)
+                    time.sleep(10)
+
+                # Sleep between cycles
+                time.sleep(30)
+
+            except Exception as e:
+                logger.error(f"[ReDiagnosis] Loop error: {e}")
+                time.sleep(60)
+
     t_price = Thread(target=fast_price_check_loop)
     t_price.daemon = True
     t_price.start()
@@ -1468,6 +1597,10 @@ def start_background_monitor():
     t_llm = Thread(target=hourly_llm_monitor_loop)
     t_llm.daemon = True
     t_llm.start()
+
+    t_rediagnosis = Thread(target=re_diagnosis_loop)
+    t_rediagnosis.daemon = True
+    t_rediagnosis.start()
 
 @app.on_event("startup")
 def startup_event():

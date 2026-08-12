@@ -136,6 +136,12 @@ def make_trade(symbol="BTC/USDT", sig_type="long", status="filled",
         "tp1_partial_closed": tp1_closed,
         "is_live": is_live,
         "current_price": entry,
+        "needs_review": False,
+        "last_review_time": None,
+        "review_trigger_price": None,
+        "core_reason": "Test signal",
+        "signal_regime": "ranging",
+        "trade_id": f"trade-{int(time.time()*1000000)}",
     }
 
 
@@ -2177,6 +2183,243 @@ class TestExchangeSLUpdateRetry:
 
         assert result == "no_position"
         mock_notify.assert_not_called()
+
+
+class TestSignalFreshnessAndReDiagnosis:
+    """Test signal freshness expiry and re-diagnosis logic."""
+
+    def test_signal_freshness_cancels_stale_pending(self, paper_engine):
+        """Pending trade older than signal_freshness_hours should be cancelled."""
+        paper_engine.state["config"]["signal_freshness_hours"] = 1.0
+        paper_engine.state["config"]["pending_ttl_hours"] = 24.0
+
+        # Create a pending trade that is 2 hours old (freshness=1h)
+        old_time = (datetime.now() - timedelta(hours=2)).strftime("%Y-%m-%d %H:%M:%S")
+        trade = make_trade(status="pending", entry=100000.0, sl=95000.0, tps=[105000.0])
+        trade["entered_at"] = old_time
+        trade["planned_entry"] = 100000.0
+        # Price is still above entry, not yet crossed
+        paper_engine.state["trades"].append(trade)
+
+        # Run price check — price hasn't crossed entry yet, shouldn't fill
+        run_price_update(paper_engine, "BTC/USDT", 98000.0, 97500.0, 97700.0)
+
+        assert trade["status"] == "cancelled"
+        assert "信号时效性" in trade.get("close_reason", "")
+
+    def test_signal_freshness_skips_fresh_trades(self, paper_engine):
+        """Pending trade younger than signal_freshness_hours should NOT be cancelled."""
+        paper_engine.state["config"]["signal_freshness_hours"] = 4.0
+        paper_engine.state["config"]["pending_ttl_hours"] = 24.0
+
+        # Create a pending trade that is 1 hour old (freshness=4h)
+        recent_time = (datetime.now() - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+        trade = make_trade(status="pending", entry=100000.0, sl=95000.0, tps=[105000.0])
+        trade["entered_at"] = recent_time
+        trade["planned_entry"] = 100000.0
+        # For a LONG pending, entry crosses when low_price <= planned_entry
+        # Use a price range that stays above planned_entry so it doesn't fill
+        # planned_entry=100000, so use low=101500 > 100000
+        paper_engine.state["trades"].append(trade)
+
+        # Run price check — price hasn't crossed entry yet (101500 > 100000)
+        run_price_update(paper_engine, "BTC/USDT", 102000.0, 101500.0, 101700.0)
+
+        assert trade["status"] == "pending"  # Still pending, not cancelled
+
+    def test_signal_freshness_respects_ttl_priority(self, paper_engine):
+        """If freshness > ttl, freshness should not trigger (ttl takes priority)."""
+        paper_engine.state["config"]["signal_freshness_hours"] = 48.0  # Longer than ttl
+        paper_engine.state["config"]["pending_ttl_hours"] = 24.0
+
+        old_time = (datetime.now() - timedelta(hours=30)).strftime("%Y-%m-%d %H:%M:%S")
+        trade = make_trade(status="pending", entry=100000.0, sl=95000.0, tps=[105000.0])
+        trade["entered_at"] = old_time
+        trade["planned_entry"] = 100000.0
+        paper_engine.state["trades"].append(trade)
+
+        run_price_update(paper_engine, "BTC/USDT", 98000.0, 97500.0, 97700.0)
+
+        # Should be cancelled by TTL (30h > 24h), not by freshness
+        assert trade["status"] == "cancelled"
+        assert "挂单超过" in trade.get("close_reason", "")
+
+    def test_re_diagnosis_triggers_on_price_proximity(self, paper_engine):
+        """Pending trade should be flagged for review when price is near entry zone."""
+        paper_engine.state["config"]["pending_review_distance_pct"] = 5.0
+        paper_engine.state["config"]["pending_review_cooldown_min"] = 30.0
+
+        # Entry center is ~100k, so 5% = ±5k
+        # Current price = 97,700 is within 5% of 100k (2.3% away)
+        trade = make_trade(status="pending", entry=100000.0, sl=95000.0, tps=[105000.0])
+        trade["planned_entry"] = 100000.0
+        trade["needs_review"] = False
+        trade["last_review_time"] = None
+        trade["review_trigger_price"] = None
+        paper_engine.state["trades"].append(trade)
+
+        run_price_update(paper_engine, "BTC/USDT", 98000.0, 97500.0, 97700.0)
+
+        assert trade["needs_review"] is True
+        assert trade["review_trigger_price"] == 97700.0
+
+    def test_re_diagnosis_respects_cooldown(self, paper_engine):
+        """Trade recently reviewed should NOT be flagged again until cooldown expires."""
+        paper_engine.state["config"]["pending_review_distance_pct"] = 5.0
+        paper_engine.state["config"]["pending_review_cooldown_min"] = 60.0
+
+        # Last review was 5 minutes ago (cooldown=60min)
+        recent_review = (datetime.now() - timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
+        trade = make_trade(status="pending", entry=100000.0, sl=95000.0, tps=[105000.0])
+        trade["planned_entry"] = 100000.0
+        trade["needs_review"] = False
+        trade["last_review_time"] = recent_review
+        trade["review_trigger_price"] = None
+        paper_engine.state["trades"].append(trade)
+
+        run_price_update(paper_engine, "BTC/USDT", 98000.0, 97500.0, 97700.0)
+
+        # Should NOT be re-flagged because cooldown hasn't expired
+        assert trade["needs_review"] is False
+
+    def test_get_pending_trades_needing_review(self, paper_engine):
+        """get_pending_trades_needing_review should return only trades with needs_review=True."""
+        trade1 = make_trade(status="pending", entry=100000.0, sl=95000.0, tps=[105000.0], symbol="BTC/USDT")
+        trade1["needs_review"] = True
+        trade1["review_trigger_price"] = 97700.0
+        trade1["trade_id"] = "trade-1"
+        trade2 = make_trade(status="pending", entry=2000.0, sl=1900.0, tps=[2100.0], symbol="ETH/USDT")
+        trade2["needs_review"] = False  # Not flagged
+        trade2["trade_id"] = "trade-2"
+        trade3 = make_trade(status="filled", entry=100000.0, sl=95000.0, tps=[105000.0], symbol="SOL/USDT")
+        trade3["needs_review"] = True  # Flagged but filled, should not be returned
+        trade3["trade_id"] = "trade-3"
+
+        paper_engine.state["trades"] = [trade1, trade2, trade3]
+
+        reviews = paper_engine.get_pending_trades_needing_review()
+
+        assert len(reviews) == 1
+        assert reviews[0]["trade_id"] == "trade-1"
+        assert reviews[0]["symbol"] == "BTC/USDT"
+
+    def test_apply_review_result_keep(self, paper_engine):
+        """apply_review_result with action='keep' should not change the trade."""
+        trade = make_trade(status="pending", entry=100000.0, sl=95000.0, tps=[105000.0])
+        trade["needs_review"] = True
+        trade["trade_id"] = "trade-keep"
+        paper_engine.state["trades"] = [trade]
+
+        result = paper_engine.apply_review_result("trade-keep", {
+            "action": "keep",
+            "reason": "市场结构未变，继续持有"
+        })
+
+        assert result["success"] is True
+        assert trade["status"] == "pending"  # Not cancelled
+        assert trade["needs_review"] is False  # Flag cleared
+        assert trade["last_review_time"] is not None
+
+    def test_apply_review_result_cancel(self, paper_engine):
+        """apply_review_result with action='cancel' should cancel the trade."""
+        trade = make_trade(status="pending", entry=100000.0, sl=95000.0, tps=[105000.0])
+        trade["needs_review"] = True
+        trade["trade_id"] = "trade-cancel"
+        paper_engine.state["trades"] = [trade]
+
+        result = paper_engine.apply_review_result("trade-cancel", {
+            "action": "cancel",
+            "reason": "市场结构已变化，取消入场"
+        })
+
+        assert result["success"] is True
+        assert trade["status"] == "cancelled"
+        assert "取消" in trade.get("close_reason", "")
+
+    def test_apply_review_result_reverse(self, paper_engine):
+        """apply_review_result with action='reverse' should reverse trade direction."""
+        trade = make_trade(status="pending", entry=100000.0, sl=95000.0, tps=[105000.0])
+        trade["needs_review"] = True
+        trade["trade_id"] = "trade-reverse"
+        paper_engine.state["trades"] = [trade]
+
+        result = paper_engine.apply_review_result("trade-reverse", {
+            "action": "reverse",
+            "new_signal_type": "short",
+            "new_entry_min": 102000.0,
+            "new_entry_max": 103000.0,
+            "new_stop_loss": 105000.0,
+            "new_take_profit_targets": [99000.0, 97000.0],
+            "reason": "市场结构反转，应做空"
+        })
+
+        assert result["success"] is True
+        # The trade_id field in the trade dict uses "trade_id" key, but the test
+        # uses "id" in make_trade. Let's check both.
+        # Actually make_trade sets "id", and now we also set "trade_id"
+        assert trade["signal_type"] == "short"
+        assert trade["entry_min"] == 102000.0
+        assert trade["entry_max"] == 103000.0
+        assert trade["stop_loss"] == 105000.0
+        assert trade["take_profit_targets"] == [99000.0, 97000.0]
+
+    def test_apply_review_result_reverse_invalid(self, paper_engine):
+        """apply_review_result with reverse but no new_signal_type should fail."""
+        trade = make_trade(status="pending", entry=100000.0, sl=95000.0, tps=[105000.0])
+        trade["needs_review"] = True
+        trade["trade_id"] = "trade-invalid"
+        paper_engine.state["trades"] = [trade]
+
+        result = paper_engine.apply_review_result("trade-invalid", {
+            "action": "reverse",
+            "reason": "反转但无新方向"
+        })
+
+        assert result["success"] is False
+        assert trade["status"] == "pending"  # Unchanged
+
+    def test_apply_review_result_unknown_trade(self, paper_engine):
+        """apply_review_result with non-existent trade_id should fail."""
+        result = paper_engine.apply_review_result("non-existent", {
+            "action": "keep",
+            "reason": "N/A"
+        })
+        assert result["success"] is False
+
+    def test_apply_review_result_filled_trade(self, paper_engine):
+        """apply_review_result should not modify filled trades."""
+        trade = make_trade(status="filled", entry=100000.0, sl=95000.0, tps=[105000.0])
+        trade["needs_review"] = True
+        trade["trade_id"] = "trade-filled"
+        paper_engine.state["trades"] = [trade]
+
+        result = paper_engine.apply_review_result("trade-filled", {
+            "action": "cancel",
+            "reason": "试试取消已成交的"
+        })
+
+        assert result["success"] is False
+        assert trade["status"] == "filled"  # Unchanged
+
+    def test_get_pending_trades_with_price_dict(self, paper_engine):
+        """get_pending_trades_needing_review with prices_dict should flag trades."""
+        paper_engine.state["config"]["pending_review_distance_pct"] = 5.0
+        paper_engine.state["config"]["pending_review_cooldown_min"] = 30.0
+
+        # Entry center is ~100k, price 97,700 is within 5%
+        trade = make_trade(status="pending", entry=100000.0, sl=95000.0, tps=[105000.0], symbol="BTC/USDT")
+        trade["needs_review"] = False
+        trade["last_review_time"] = None
+        trade["trade_id"] = "trade-px"
+        paper_engine.state["trades"] = [trade]
+
+        reviews = paper_engine.get_pending_trades_needing_review(
+            prices_dict={"BTC/USDT": 97700.0}
+        )
+
+        assert len(reviews) == 1
+        assert reviews[0]["trade_id"] == "trade-px"
+        assert trade["needs_review"] is True
 
 
 # ═══════════════════════════════════════════════════════════════
