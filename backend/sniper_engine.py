@@ -94,7 +94,7 @@ class SniperEngine:
                     "ZAMA/USDT": 1.6
                 },
                 # Per-trade max loss as % of margin before force-close
-                "max_trade_loss_percent": 50.0,
+                "max_trade_loss_percent": 30.0,
                 # ⏰ Signal freshness: pending orders older than this trigger re-diagnosis
                 # (was: auto-cancel; now: flag for LLM review instead of hard cancel)
                 "signal_freshness_hours": 4.0,
@@ -414,14 +414,16 @@ class SniperEngine:
         """
         Anti-Suffocation Tiered Trailing Stop (防窒息分段阶梯锁利算法):
 
-        - Peak PnL < 25%: Keep initial technical stop (100% breathing room for early trend incubation).
-        - 25% <= Peak PnL < 40%: Move stop loss to actual_entry (breakeven protection, zero-risk trade).
+        - Peak PnL < 10%: Keep initial technical stop (breathing room for early trend incubation).
+        - 10% <= Peak PnL < 20%: Move stop loss to actual_entry (breakeven protection, zero-risk trade).
+        - 20% <= Peak PnL < 40%: Lock 40% of peak gains (e.g. 20% peak → SL ensures +8%).
         - 40% <= Peak PnL < 100%: Trailing stop activates, locking 50% of peak gains.
         - Peak PnL >= 100%: High-yield protection, locking 70% of peak gains (max 30% profit giveback).
         - Safety Buffer: Minimum 0.6% price distance from mark price to avoid noise-driven / spread stops.
         """
-        ACTIVATION_THRESHOLD = 25.0   # minimum PnL% to move stop loss to breakeven
+        ACTIVATION_THRESHOLD = 10.0   # minimum PnL% to move stop loss to breakeven (was 25, lowered to protect 10%+ gains)
         TRAILING_THRESHOLD   = 40.0   # minimum PnL% to activate ratio-based trailing stop
+        INTERMEDIATE_THRESHOLD = 20.0 # minimum PnL% to start locking partial gains (between breakeven and full trailing)
         MIN_PEAK_STEP       = 4.0     # min peak advance (%) before updating SL
         MIN_PRICE_SAFETY_BUFFER = 0.006  # 0.6% minimum price safety distance buffer
 
@@ -435,12 +437,12 @@ class SniperEngine:
 
         peak = t.get("peak_pnl_pct", 0.0)
 
-        # 1. Peak PnL < 25%: Keep initial technical stop (give trade 100% breathing room to develop)
+        # 1. Peak PnL < 10%: Keep initial technical stop (give trade breathing room to develop)
         if peak < ACTIVATION_THRESHOLD:
             return False
 
-        # 2. 25% <= Peak PnL < 40%: Move stop loss to breakeven (actual_entry) with zero-risk protection
-        if peak < TRAILING_THRESHOLD:
+        # 2. 10% <= Peak PnL < 20%: Move stop loss to breakeven (actual_entry) with zero-risk protection
+        if peak < INTERMEDIATE_THRESHOLD:
             breakeven_sl = round(actual_entry, 6)
             current_sl = t.get("stop_loss")
             if current_sl is not None and current_sl != "-":
@@ -460,6 +462,75 @@ class SniperEngine:
 
             logger.info(f"[TrailingStop] 🛡️ {t['symbol']} 保本防守生效: 浮盈={round(peak, 1)}% → 止损 ${old_sl} → ${breakeven_sl} (保本价)")
             self._update_live_sl_order_on_exchange(t, sig_type, amount, breakeven_sl)
+            return True
+
+        # 2.5. 20% <= Peak PnL < 40%: Intermediate trailing — lock 40% of peak gains
+        if peak < TRAILING_THRESHOLD:
+            INTERMEDIATE_LOCK_RATIO = 0.40
+            lock_in_pct = peak * INTERMEDIATE_LOCK_RATIO
+            price_move_ratio = lock_in_pct / 100.0 / lev
+            if sig_type == "long":
+                raw_sl = actual_entry * (1 + price_move_ratio)
+            else:
+                raw_sl = actual_entry * (1 - price_move_ratio)
+
+            # Apply Safety Buffer
+            mark_price = t.get("mark_price", 0.0) or t.get("current_price", 0.0) or actual_entry
+            if mark_price > 0:
+                if sig_type == "long":
+                    max_allowed_sl = mark_price * (1.0 - MIN_PRICE_SAFETY_BUFFER)
+                    if raw_sl > max_allowed_sl:
+                        raw_sl = max_allowed_sl
+                    # Never let safety buffer push SL below breakeven in intermediate tier
+                    if raw_sl < actual_entry:
+                        raw_sl = actual_entry
+                else:
+                    min_allowed_sl = mark_price * (1.0 + MIN_PRICE_SAFETY_BUFFER)
+                    if raw_sl < min_allowed_sl:
+                        raw_sl = min_allowed_sl
+                    # Never let safety buffer push SL above breakeven in intermediate tier
+                    if raw_sl > actual_entry:
+                        raw_sl = actual_entry
+
+            new_sl = round(raw_sl, 6)
+
+            # Only move SL in the profitable direction (never worsen it)
+            current_sl = t.get("stop_loss")
+            if current_sl is not None and current_sl != "-":
+                try:
+                    current_sl_f = float(current_sl)
+                    if sig_type == "long" and new_sl <= current_sl_f:
+                        return False
+                    if sig_type == "short" and new_sl >= current_sl_f:
+                        return False
+                except (TypeError, ValueError):
+                    pass
+
+            # Only update when peak has advanced meaningfully
+            last_peak_at_update = t.get("trailing_sl_level", 0.0)
+            if peak - last_peak_at_update < MIN_PEAK_STEP:
+                return False
+
+            old_sl = t.get("stop_loss", "-")
+            t["stop_loss"] = new_sl
+            t["trailing_sl_level"] = peak
+            t["locked_pnl_percent"] = round(lock_in_pct, 1)
+
+            logger.info(
+                f"[TrailingStop] 🔒 {t['symbol']} 中间阶梯锁利: "
+                f"峰值={round(peak, 1)}% → 锁定 {round(lock_in_pct, 1)}% → "
+                f"止损 ${old_sl} → ${new_sl}  (杠杆 {lev}x)"
+            )
+            self._update_live_sl_order_on_exchange(t, sig_type, amount, new_sl)
+
+            self._send_notification(
+                f"🔒 动态追踪止损激活：{t['symbol']}",
+                f"🔒 *【动态止损上移通知】*\n"
+                f"币种：{t['symbol']} ({sig_type.upper()})\n"
+                f"历史峰值浮盈：{round(peak, 1)}%\n"
+                f"已锁定收益：{round(lock_in_pct, 1)}%\n"
+                f"止损已从 ${old_sl} 上移至 ${new_sl}"
+            )
             return True
 
         # 3. Peak PnL >= 40%: Ratio-based trailing stop
@@ -1287,7 +1358,7 @@ class SniperEngine:
                     self._closed_external_symbols = {s: exp for s, exp in self._closed_external_symbols.items() if exp > _now}
 
                     cfg = self.state.get("config", {})
-                    max_loss_pct = float(cfg.get("max_trade_loss_percent", 50.0))
+                    max_loss_pct = float(cfg.get("max_trade_loss_percent", 30.0))
                     for (symbol, side), pos in real_pos_map.items():
                         # Skip if this symbol was manually closed and tombstone hasn't expired
                         if symbol in self._closed_external_symbols:
@@ -3041,7 +3112,7 @@ class SniperEngine:
 
             # 🛡️ PnL-based risk control (风控用实际盈亏做风控)
             # Check BOTH close-based PnL AND worst-case (wick-based) PnL to catch gap-through scenarios
-            max_trade_loss_pct = float(cfg.get("max_trade_loss_percent", cfg.get("max_trade_loss_pct", 50.0)))
+            max_trade_loss_pct = float(cfg.get("max_trade_loss_percent", cfg.get("max_trade_loss_pct", 30.0)))
             if sig_type == "long":
                 worst_price = low_price
                 worst_pnl_pct = (worst_price - actual_entry) / actual_entry * lev * 100.0

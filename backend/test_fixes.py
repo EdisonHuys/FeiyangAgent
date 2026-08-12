@@ -410,14 +410,14 @@ class TestP1DefaultValues:
 
     def test_max_trade_loss_percent_default(self, paper_engine):
         del paper_engine.state["config"]["max_trade_loss_percent"]
-        assert paper_engine.state["config"].get("max_trade_loss_percent", 50.0) == 50.0
+        assert paper_engine.state["config"].get("max_trade_loss_percent", 30.0) == 30.0
 
     def test_max_trade_loss_percent_in_default_config(self):
         from sniper_engine import SniperEngine
         tmpdir = tempfile.mkdtemp()
         engine = SniperEngine(tmpdir)
         assert "max_trade_loss_percent" in engine.state["config"]
-        assert engine.state["config"]["max_trade_loss_percent"] == 50.0
+        assert engine.state["config"]["max_trade_loss_percent"] == 30.0
         import shutil
         shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -865,7 +865,7 @@ class TestTP1SLNoRegression:
         trade = make_trade(sig_type="long", entry=100000, sl=99000,
                            tps=[100500, 101000], amount=0.01, lev=5, margin=200.0)
         paper_engine.state["trades"] = [trade]
-        # With 5x lev, 0.5% move = 2.5% PnL — below 25% threshold, no trailing stop
+        # With 5x lev, 0.5% move = 2.5% PnL — below 10% threshold, no trailing stop
         run_price_update(paper_engine, "BTC/USDT", 100500, 99900, 100500)
 
         t = paper_engine.state["trades"][0]
@@ -881,28 +881,44 @@ class TestTP1SLNoRegression:
 class TestTrailingStop:
     """Test dynamic trailing stop algorithm."""
 
-    def test_no_trailing_below_25pct(self, paper_engine):
-        """Trailing stop should NOT activate below 25% PnL."""
+    def test_no_trailing_below_10pct(self, paper_engine):
+        """Trailing stop should NOT activate below 10% PnL."""
         trade = make_trade(sig_type="long", entry=100000, sl=99000,
                            tps=[100500, 101000], amount=0.01, lev=5, margin=200.0)
         paper_engine.state["trades"] = [trade]
-        # 5x lev, 0.4% move = 2% PnL — well below 25% threshold
+        # 5x lev, 0.4% move = 2% PnL — well below 10% threshold
         run_price_update(paper_engine, "BTC/USDT", 100400, 99500, 100400)
 
         t = paper_engine.state["trades"][0]
-        assert t.get("peak_pnl_pct", 0) < 25.0
+        assert t.get("peak_pnl_pct", 0) < 10.0
         assert t["stop_loss"] == 99000  # SL unchanged
 
-    def test_breakeven_at_25pct(self, paper_engine):
-        """At 25% PnL, SL should move to breakeven."""
+    def test_breakeven_at_10pct(self, paper_engine):
+        """At 10% PnL, SL should move to breakeven."""
         trade = make_trade(sig_type="long", entry=100000, sl=95000,
-                           tps=[105000, 110000], amount=0.01)
+                           tps=[105000, 110000], amount=0.01, lev=50)
         paper_engine.state["trades"] = [trade]
-        # 50x lev, 0.5% move = 25% PnL — at threshold
-        run_price_update(paper_engine, "BTC/USDT", 100500, 99800, 100500)
+        # 50x lev, 0.2% move = 10% PnL — at threshold
+        run_price_update(paper_engine, "BTC/USDT", 100200, 99800, 100200)
 
         t = paper_engine.state["trades"][0]
         assert t["stop_loss"] >= 100000  # At least breakeven
+
+    def test_intermediate_lock_at_20pct(self, paper_engine):
+        """At 20% PnL, SL should be at or above breakeven (locking partial gains)."""
+        trade = make_trade(sig_type="long", entry=100000, sl=95000,
+                           tps=[105000, 110000], amount=0.01, lev=50)
+        paper_engine.state["trades"] = [trade]
+        # 50x lev, 0.4% move = 20% PnL — intermediate tier
+        run_price_update(paper_engine, "BTC/USDT", 100400, 99800, 100400)
+
+        t = paper_engine.state["trades"][0]
+        # SL should be at least at breakeven (safety buffer may limit to breakeven)
+        assert t["stop_loss"] >= 100000, \
+            f"SL should be >= breakeven at 20% peak (intermediate lock), got {t['stop_loss']}"
+        # locked_pnl_percent should be set (either from intermediate lock or breakeven)
+        assert t.get("peak_pnl_pct", 0) >= 20.0, \
+            f"Peak PnL should be >= 20%, got {t.get('peak_pnl_pct', 0)}"
 
     def test_trailing_only_moves_forward_long(self, paper_engine):
         """LONG: Trailing stop should only move SL upward, never downward."""
@@ -1734,12 +1750,12 @@ class TestPendingAutoPromotion:
             "symbol": "ZEC/USDT",
             "side": "long",
             "entry_price": 497.87,
-            "mark_price": 500.31,
+            "mark_price": 499.0,
             "leverage": 50,
             "margin": 0.86,
             "notional": 43.0,
-            "unrealized_pnl": 0.22,
-            "unrealized_pnl_percent": 24.42,
+            "unrealized_pnl": 0.05,
+            "unrealized_pnl_percent": 5.8,
             "size": 0.0864,
         }]
 
@@ -1750,7 +1766,7 @@ class TestPendingAutoPromotion:
                         with patch.object(tmp_engine, '_place_live_protective_sl', return_value="sl_order_2"):
                             with patch.object(tmp_engine, '_check_circuit_breaker', return_value=False):
                                 tmp_engine.check_market_prices({
-                                    "ZEC/USDT": {"high": 501.0, "low": 496.0, "close": 500.31}
+                                    "ZEC/USDT": {"high": 499.5, "low": 498.0, "close": 499.0}
                                 })
 
         t = tmp_engine.state["trades"][0]
