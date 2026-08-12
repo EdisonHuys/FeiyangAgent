@@ -1934,6 +1934,58 @@ class TestAutoAdoptExternal:
             assert t["status"] == "filled"
             assert t.get("auto_adopted") is True
 
+    def test_reopened_trade_has_fresh_timestamps(self, tmp_engine):
+        """When a closed trade is reopened for auto-adopt, entered_at and filled_at
+        must be reset to NOW — otherwise the time stop-loss fires immediately
+        using the original trade's old timestamps."""
+        from datetime import datetime, timedelta
+
+        tmp_engine.state["config"]["mode"] = "live"
+        tmp_engine.state["config"]["live_api_key"] = "test_key"
+        tmp_engine.state["config"]["live_secret"] = "test_secret"
+        tmp_engine.state["config"]["max_trade_loss_percent"] = 30.0
+
+        # A closed trade with OLD timestamps (5 days ago)
+        old_time = (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d %H:%M:%S")
+        closed_trade = make_trade(
+            symbol="ZEC/USDT", sig_type="long", status="closed_tp",
+            entry=497.87, sl=496.5, tps=[510.0, 522.0],
+            is_live=True, lev=50
+        )
+        closed_trade["id"] = "trade-old-123"
+        closed_trade["entered_at"] = old_time
+        closed_trade["filled_at"] = old_time
+        closed_trade["close_reason"] = "closed days ago"
+        tmp_engine.state["trades"] = [closed_trade]
+
+        mock_positions = [{
+            "symbol": "ZEC/USDT", "side": "long",
+            "entry_price": 497.87, "mark_price": 500.31,
+            "leverage": 50, "margin": 0.86, "notional": 43.0,
+            "unrealized_pnl": 0.22, "unrealized_pnl_percent": 24.42,
+            "size": 0.0864,
+        }]
+
+        before_time = datetime.now()
+
+        with patch.object(tmp_engine, '_fetch_live_positions', return_value=mock_positions):
+            with patch.object(tmp_engine, '_send_notification'):
+                with patch.object(tmp_engine, '_init_live_ccxt', return_value=(MagicMock(), "binance")):
+                    with patch.object(tmp_engine, '_place_live_protective_sl', return_value="sl_003"):
+                        trades = tmp_engine.get_trades(mode_filter="live")
+
+        after_time = datetime.now()
+
+        assert trades[0]["status"] == "filled"
+        # entered_at and filled_at must be recent (within 60 seconds of now),
+        # NOT the old timestamp from 5 days ago
+        reopened_at = datetime.strptime(trades[0]["entered_at"], "%Y-%m-%d %H:%M:%S")
+        refilled_at = datetime.strptime(trades[0]["filled_at"], "%Y-%m-%d %H:%M:%S")
+        assert reopened_at > before_time - timedelta(seconds=5), \
+            f"entered_at should be recent, got {trades[0]['entered_at']} (old was {old_time})"
+        assert refilled_at > before_time - timedelta(seconds=5), \
+            f"filled_at should be recent, got {trades[0]['filled_at']} (old was {old_time})"
+
 
 # ═══════════════════════════════════════════════════════════════
 # Exchange-Side SL Update with Algo Order Support (Trailing Stop Fix)

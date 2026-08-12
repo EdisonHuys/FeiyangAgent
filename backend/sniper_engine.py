@@ -1324,6 +1324,11 @@ class SniperEngine:
                             closed_trade["actual_entry"] = entry_px
                             closed_trade["stop_loss"] = auto_sl
                             closed_trade["initial_stop_loss"] = auto_sl
+                            # Reset timestamps to NOW so time-based stop-loss doesn't
+                            # fire immediately using the original trade's old entered_at.
+                            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            closed_trade["entered_at"] = now_str
+                            closed_trade["filled_at"] = now_str
                             closed_trade["pnl_usd"] = round(pos["unrealized_pnl"], 2)
                             closed_trade["pnl_percent"] = round(pos["unrealized_pnl_percent"], 2)
                             closed_trade["unrealized_pnl_usd"] = round(pos["unrealized_pnl"], 2)
@@ -2409,6 +2414,7 @@ class SniperEngine:
             if immediate_fill:
                 new_trade["status"] = "filled"
                 new_trade["actual_entry"] = planned_entry
+                new_trade["filled_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 entry_fee = self._record_fee(new_trade, pos_val, maker_fee)
                 cfg["paper_account_balance"] = round(cfg.get("paper_account_balance", 0.0) - entry_fee, 4)
 
