@@ -1598,6 +1598,55 @@ class SniperEngine:
             return 0.7
         return 1.0
 
+    def _get_volatility_ratio(self, symbol, lookback=50):
+        """
+        Fetch 1h OHLCV data and compute the volatility ratio (current ATR / average ATR).
+        Used to adjust position sizing: high volatility → reduce size, low volatility → allow slightly larger.
+
+        Returns:
+            float: volatility ratio (1.0 = normal, >1.0 = high vol, <1.0 = low vol).
+                   Returns 1.0 if data cannot be fetched.
+        """
+        try:
+            from data_fetcher import get_data_fetcher
+            cfg = self.state.get("config", {})
+            exchange_id = cfg.get("exchange", "binance")
+            fetcher = get_data_fetcher(exchange_id)
+            df = fetcher.fetch_ohlcv(symbol, timeframe="1h", limit=lookback)
+            if df is None or len(df) < 20:
+                return 1.0
+
+            # Manual ATR calculation (no pandas_ta dependency)
+            highs = df["high"].values
+            lows = df["low"].values
+            closes = df["close"].values
+
+            tr_values = []
+            for i in range(1, len(closes)):
+                hl = highs[i] - lows[i]
+                hc = abs(highs[i] - closes[i - 1])
+                lc = abs(lows[i] - closes[i - 1])
+                tr = max(hl, hc, lc)
+                tr_values.append(tr)
+
+            if len(tr_values) < 14:
+                return 1.0
+
+            # Simple SMA ATR over 14 periods
+            atr_14 = sum(tr_values[-14:]) / 14.0
+            # Average ATR over all available (at least 20)
+            avg_atr = sum(tr_values) / len(tr_values)
+
+            if avg_atr <= 0:
+                return 1.0
+
+            ratio = atr_14 / avg_atr
+            logger.info(f"[VolatilityRatio] {symbol}: ATR_14={atr_14:.4f}, avg_ATR={avg_atr:.4f}, ratio={ratio:.2f}")
+            return ratio
+        except Exception as e:
+            logger.debug(f"[VolatilityRatio] Failed to compute for {symbol}: {e}")
+            return 1.0
+
     def close_position_manually(self, trade_id):
         """Thread-safe entry point."""
         with self._lock:
@@ -2059,17 +2108,24 @@ class SniperEngine:
             return None
 
         # 🔗 Correlation check: avoid same-direction positions on highly correlated pairs
-        CORRELATED_GROUPS = [
-            {"BTC/USDT", "ETH/USDT"},           # BTC-ETH high correlation
-            {"DOGE/USDT", "HYPE/USDT"},         # Alt-meme correlation
-        ]
+        # Use config-defined groups (with hardcoded fallback)
+        cfg_corr_groups = cfg.get("correlation_groups", [])
+        if not cfg_corr_groups:
+            CORRELATED_GROUPS = [
+                {"BTC/USDT", "ETH/USDT"},           # BTC-ETH high correlation
+                {"DOGE/USDT", "HYPE/USDT"},         # Alt-meme correlation
+            ]
+        else:
+            CORRELATED_GROUPS = [set(g) for g in cfg_corr_groups]
         trades = self.state.get("trades", [])
-        active_filled = [t for t in trades if t["status"] in ["filled", "tp1_hit"]]
+        # Check both active filled positions AND pending orders to prevent correlated overexposure
+        active_corr = [t for t in trades if t["status"] in ["pending", "filled", "tp1_hit"]]
         for group in CORRELATED_GROUPS:
             if symbol in group:
-                for t in active_filled:
+                for t in active_corr:
                     if t["symbol"] in group and t["symbol"] != symbol and t["signal_type"] == sig_type_check:
-                        msg = f"🛡️ [狙击系统] 强相关性风控拦截：由于已持有同向的 {t['symbol']} ({sig_type_check.upper()}) 仓位，已自动拦截 {symbol} ({sig_type_check.upper()}) 挂单。"
+                        t_status_label = "挂单" if t["status"] == "pending" else "仓位"
+                        msg = f"🛡️ [狙击系统] 强相关性风控拦截：由于已有同向的 {t['symbol']} ({sig_type_check.upper()}) {t_status_label}，已自动拦截 {symbol} ({sig_type_check.upper()}) 挂单。"
                         logger.info(msg)
                         try:
                             from app import log_monitor_event
@@ -2141,7 +2197,7 @@ class SniperEngine:
                         # Live market close via CCXT if live trade
                         if old_t.get("is_live"):
                             rem_amount = round(old_t["position_size_usd"] * (0.5 if old_t.get("tp1_partial_closed") else 1.0) / old_t.get("actual_entry", 1.0), 4)
-                            if not self._try_live_close(old_t, symbol, old_sig, rem_amount, reason=f"🔄 触发高置信度 ({conf}/10分) 反向 {sig_type.upper()} 信号，市价平仓翻向", alert_tag="reversal", current_price=close_px):
+                            if not self._try_live_close(old_t, symbol, old_sig, rem_amount, reason=f"🔄 触发高置信度 ({conf}/12分) 反向 {sig_type.upper()} 信号，市价平仓翻向", alert_tag="reversal", current_price=close_px):
                                 logger.warning(f"[SniperEngine] [{symbol}] Reversal close FAILED on exchange — aborting reversal, keeping old {old_sig.upper()} position")
                                 return None
 
@@ -2167,7 +2223,7 @@ class SniperEngine:
                         old_t["pnl_percent"] = round((final_pnl / margin) * 100.0, 2) if margin > 0 else 0.0
                         old_t["status"] = "closed_tp" if final_pnl >= 0 else "closed_sl"
                         old_t["closed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        old_t["close_reason"] = f"🔄 触发高置信度 ({conf}/10分) 反向 {sig_type.upper()} 信号，自动平仓旧 {old_sig.upper()} 仓位锁定利润离场"
+                        old_t["close_reason"] = f"🔄 触发高置信度 ({conf}/12分) 反向 {sig_type.upper()} 信号，自动平仓旧 {old_sig.upper()} 仓位锁定利润离场"
 
                         if not old_t.get("is_live"):
                             cfg["paper_account_balance"] = round(cfg.get("paper_account_balance", 10000.0) + leg_net, 2)
@@ -2175,7 +2231,7 @@ class SniperEngine:
                         logger.info(f"[SniperEngine] 🔄 Reversal triggered for {symbol}: closed old {old_sig.upper()} position at ${close_px}, PnL=${final_pnl}")
                         self._send_notification(
                             f"🔄 狙击智能平仓翻向通知：{symbol}",
-                            f"🔄 *【反向信号平仓翻向通知】*\n币种：{symbol}\n旧持仓：{old_sig.upper()} -> 现信号：{sig_type.upper()} ({conf}/10分)\n平仓触发价：${close_px}\n实现盈亏：${final_pnl} USD ({old_t['pnl_percent']}%)\n原因：{old_t['close_reason']}"
+                            f"🔄 *【反向信号平仓翻向通知】*\n币种：{symbol}\n旧持仓：{old_sig.upper()} -> 现信号：{sig_type.upper()} ({conf}/12分)\n平仓触发价：${close_px}\n实现盈亏：${final_pnl} USD ({old_t['pnl_percent']}%)\n原因：{old_t['close_reason']}"
                         )
 
         # Re-evaluate active positions count AFTER handling existing trades for this symbol
@@ -2257,10 +2313,33 @@ class SniperEngine:
         # 📊 Adaptive risk: adjust risk_pct based on recent win rate
         risk_pct = self._adaptive_risk_adjust(risk_pct)
 
+        # 📊 Volatility-based position sizing: adjust position value based on market volatility
+        # High volatility (ratio > 2.0) → halve position; low volatility (ratio < 0.5) → allow 1.2x
+        vol_ratio = self._get_volatility_ratio(symbol)
+        if vol_ratio > 2.0:
+            vol_mult = 0.5
+        elif vol_ratio > 1.5:
+            vol_mult = 0.75
+        elif vol_ratio < 0.5:
+            vol_mult = 1.2
+        elif vol_ratio < 0.75:
+            vol_mult = 1.1
+        else:
+            vol_mult = 1.0
+
+        if vol_mult != 1.0:
+            logger.info(f"[VolatilitySizing] {symbol}: vol_ratio={vol_ratio:.2f}, multiplier={vol_mult}")
+
         exec_entry = curr_px if instant_fill else planned_entry
         pos_val, margin, lev = self.calculate_trade_params(
             balance, risk_pct, exec_entry, sl, conf, max_lev
         )
+
+        # Apply volatility multiplier to position value
+        if vol_mult != 1.0:
+            pos_val = round(pos_val * vol_mult, 2)
+            margin = round(pos_val / lev, 2)
+            logger.info(f"[VolatilitySizing] {symbol}: adjusted position ${pos_val} (margin=${margin}, lev={lev}x)")
 
         trade_id = f"trade-{int(time.time() * 1000)}"
         new_trade = {
@@ -3255,6 +3334,29 @@ class SniperEngine:
                     })
 
             return reviews
+
+    def reset_review_flag(self, trade_id):
+        """
+        Reset the needs_review flag for a pending trade without executing a review.
+        Used when the re-diagnosis process encounters an error and needs to
+        release the flag to prevent infinite retry loops.
+
+        Args:
+            trade_id: The trade_id of the pending trade to reset.
+
+        Returns:
+            dict: {"success": True/False, "message": ...}
+        """
+        with self._lock:
+            for t in self.state.get("trades", []):
+                if t.get("trade_id") == trade_id and t["status"] == "pending":
+                    t["needs_review"] = False
+                    t["last_review_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    self._save_state()
+                    logger.info(f"[SniperEngine] Reset needs_review flag for trade {trade_id} ({t['symbol']})")
+                    return {"success": True, "message": f"Review flag reset for {t['symbol']}"}
+            logger.warning(f"[SniperEngine] Cannot reset review flag: trade {trade_id} not found or not pending.")
+            return {"success": False, "message": f"Trade {trade_id} not found or not pending."}
 
     def apply_review_result(self, trade_id, review_result):
         """

@@ -234,7 +234,7 @@ def process_signal_evaluation(symbol: str, payload: dict, json_signal: dict, mar
     if sig_type == "wait":
         last_signals[symbol] = {"signal_type": "wait"}
         save_signals_state(last_signals)
-        log_monitor_event(f"✅ [{source_tag}] {symbol} 诊断完成。交易决策：WAIT (观望等待)，当前价：${current_price}，置信度：{conf}/10。已静默不发送推送。")
+        log_monitor_event(f"✅ [{source_tag}] {symbol} 诊断完成。交易决策：WAIT (观望等待)，当前价：${current_price}，置信度：{conf}/12。已静默不发送推送。")
         return
 
     if sig_type in ["long", "short"]:
@@ -804,7 +804,7 @@ def run_analysis(req: AnalysisRequest):
 
             sig_label = json_signal.get("signal_type", "wait").upper()
             conf = json_signal.get("confidence_score", 0)
-            log_monitor_event(f"✅ [手动诊断成功] {symbol} 诊断完成。交易决策：{sig_label}，置信度：{conf}/10。")
+            log_monitor_event(f"✅ [手动诊断成功] {symbol} 诊断完成。交易决策：{sig_label}，置信度：{conf}/12。")
 
             with analysis_tasks_lock:
                 analysis_tasks[task_id]["status"] = "done"
@@ -1511,6 +1511,8 @@ def start_background_monitor():
                         except Exception as fetch_e:
                             logger.warning(f"[ReDiagnosis] Failed to fetch short-term data for {symbol}: {fetch_e}")
                             log_monitor_event(f"⚠️ [再诊断] {symbol} 获取短期 K 线数据失败，跳过本次再诊断：{fetch_e}")
+                            # Reset needs_review to prevent infinite retry loops
+                            sniper_engine.reset_review_flag(trade["trade_id"])
                             continue
 
                         # Helper: build compact market data dict for a given timeframe
@@ -1541,6 +1543,8 @@ def start_background_monitor():
                         if not market_data_15m and not market_data_30m and not market_data_1h:
                             logger.warning(f"[ReDiagnosis] No usable market data for {symbol}, skipping re-diagnosis.")
                             log_monitor_event(f"⚠️ [再诊断] {symbol} 无可用 K 线数据，跳过本次再诊断")
+                            # Reset needs_review to prevent infinite retry loops
+                            sniper_engine.reset_review_flag(trade["trade_id"])
                             continue
 
                         # Build the re-diagnosis payload with multi-timeframe market data
@@ -1599,6 +1603,11 @@ def start_background_monitor():
                     except Exception as trade_e:
                         logger.error(f"[ReDiagnosis] Error processing trade {trade.get('trade_id', '?')}: {trade_e}")
                         log_monitor_event(f"⚠️ [再诊断] {trade.get('symbol', '?')} 处理异常：{trade_e}")
+                        # Reset needs_review to prevent infinite retry loops
+                        try:
+                            sniper_engine.reset_review_flag(trade["trade_id"])
+                        except Exception:
+                            pass
 
                     # Cooldown between re-diagnosis calls (avoid rate limits)
                     time.sleep(10)
