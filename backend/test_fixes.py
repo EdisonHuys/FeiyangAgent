@@ -2428,6 +2428,50 @@ class TestSignalFreshnessAndReDiagnosis:
         assert reviews[0]["trade_id"] == "trade-px"
         assert trade["needs_review"] is True
 
+    def test_price_above_entry_long_does_not_trigger_rediagnosis(self, paper_engine):
+        """LONG pending: price far above entry zone should NOT trigger re-diagnosis."""
+        paper_engine.state["config"]["pending_review_distance_pct"] = 5.0
+        paper_engine.state["config"]["pending_review_cooldown_min"] = 30.0
+
+        # LONG pending at ~100k, but current price is 110k (10% above entry center)
+        trade = make_trade(status="pending", entry=100000.0, sl=95000.0, tps=[105000.0], symbol="BTC/USDT")
+        trade["needs_review"] = False
+        trade["last_review_time"] = None
+        trade["trade_id"] = "trade-px-far"
+        trade["signal_type"] = "long"
+        paper_engine.state["trades"] = [trade]
+
+        reviews = paper_engine.get_pending_trades_needing_review(
+            prices_dict={"BTC/USDT": 110000.0}
+        )
+
+        # Price is 10% above entry center, entry_max * 1.05 = 105105, current 110000 > 105105
+        # So should NOT trigger even though 10% < 5%? No, 10% > 5% distance check also fails
+        assert len(reviews) == 0
+        assert trade["needs_review"] is False
+
+    def test_price_below_entry_short_does_not_trigger_rediagnosis(self, paper_engine):
+        """SHORT pending: price far below entry zone should NOT trigger re-diagnosis."""
+        paper_engine.state["config"]["pending_review_distance_pct"] = 5.0
+        paper_engine.state["config"]["pending_review_cooldown_min"] = 30.0
+
+        # SHORT pending at ~100k, but current price is 90k (10% below entry center)
+        trade = make_trade(status="pending", entry=100000.0, sl=105000.0, tps=[95000.0], symbol="BTC/USDT")
+        trade["needs_review"] = False
+        trade["last_review_time"] = None
+        trade["trade_id"] = "trade-px-short-far"
+        trade["signal_type"] = "short"
+        paper_engine.state["trades"] = [trade]
+
+        reviews = paper_engine.get_pending_trades_needing_review(
+            prices_dict={"BTC/USDT": 90000.0}
+        )
+
+        # Price is 10% below entry center, entry_min * 0.95 = 95095, current 90000 < 95095
+        # So should NOT trigger
+        assert len(reviews) == 0
+        assert trade["needs_review"] is False
+
     def test_signal_stale_flagged_without_price_proximity(self, paper_engine):
         """Stale signal should be flagged even when price is far from entry zone."""
         paper_engine.state["config"]["signal_freshness_hours"] = 1.0

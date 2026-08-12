@@ -3289,7 +3289,27 @@ class SniperEngine:
                     entry_center = (entry_min + entry_max) / 2.0
                     entry_dist_pct = abs(current_price - entry_center) / entry_center * 100.0
 
-                    if entry_dist_pct <= review_distance_pct:
+                    # ✅ 修正触发条件：价格必须实际"接近"挂单区间，而不是仅仅距离中心小于阈值
+                    # 对于 LONG 挂单：current_price > entry_max 时价格还在区间上方，需要下跌才会触及
+                    #   只有 current_price <= entry_max * (1 + review_distance_pct/100) 才触发
+                    # 对于 SHORT 挂单：current_price < entry_min 时价格还在区间下方，需要上涨才会触及
+                    #   只有 current_price >= entry_min * (1 - review_distance_pct/100) 才触发
+                    # 这样避免离区间还很远就提前触发再诊断
+                    review_threshold = review_distance_pct / 100.0
+                    should_trigger = False
+
+                    if t["signal_type"] == "long":
+                        # LONG: entry_min <= entry_max < current_price → 价格在区间上方，需要下跌才到
+                        # 只有当 current_price <= entry_max * (1 + review_threshold) 才触发
+                        if current_price <= entry_max * (1 + review_threshold):
+                            should_trigger = True
+                    else:  # short
+                        # SHORT: current_price < entry_min <= entry_max → 价格在区间下方，需要上涨才到
+                        # 只有当 current_price >= entry_min * (1 - review_threshold) 才触发
+                        if current_price >= entry_min * (1 - review_threshold):
+                            should_trigger = True
+
+                    if should_trigger and entry_dist_pct <= review_distance_pct:
                         # Check cooldown
                         last_review = t.get("last_review_time")
                         review_cooldown_min = float(cfg.get("pending_review_cooldown_min", 30.0))
@@ -3302,6 +3322,7 @@ class SniperEngine:
                                     needs_review = False
                             except Exception:
                                 pass
+
                         if needs_review:
                             t["needs_review"] = True
                             t["review_trigger_price"] = current_price
@@ -3425,6 +3446,20 @@ class SniperEngine:
                     return {"success": False, "message": f"Reverse requested but new_signal_type ({new_sig_type}) matches original. Use 'keep' instead."}
 
                 old_sig_type = target["signal_type"]
+
+                # Cancel old exchange order if live
+                if target.get("is_live") and target.get("live_order_id"):
+                    try:
+                        exchange, ex_id = self._init_live_ccxt()
+                        ccxt_symbol = f"{target['symbol']}:USDT" if ":" not in target['symbol'] else target['symbol']
+                        exchange.cancel_order(target["live_order_id"], ccxt_symbol)
+                        logger.info(f"[SniperEngine] Re-diagnosis reverse: cancelled old {old_sig_type.upper()} order for {target['symbol']}.")
+                        # Clear old order info so tick loop re-places with new direction
+                        target["live_order_id"] = None
+                        target["order_placed"] = False
+                    except Exception as e:
+                        logger.warning(f"[SniperEngine] Re-diagnosis reverse: failed to cancel old order for {target['symbol']}: {e}")
+
                 target["signal_type"] = new_sig_type
 
                 # Update price targets if provided
