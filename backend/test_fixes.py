@@ -2188,24 +2188,31 @@ class TestExchangeSLUpdateRetry:
 class TestSignalFreshnessAndReDiagnosis:
     """Test signal freshness expiry and re-diagnosis logic."""
 
-    def test_signal_freshness_cancels_stale_pending(self, paper_engine):
-        """Pending trade older than signal_freshness_hours should be cancelled."""
+    def test_signal_freshness_flags_stale_instead_of_cancel(self, paper_engine):
+        """Pending trade older than signal_freshness_hours should be flagged stale, not cancelled."""
         paper_engine.state["config"]["signal_freshness_hours"] = 1.0
+        paper_engine.state["config"]["ambush_patience_hours"] = 24.0
         paper_engine.state["config"]["pending_ttl_hours"] = 24.0
 
         # Create a pending trade that is 2 hours old (freshness=1h)
         old_time = (datetime.now() - timedelta(hours=2)).strftime("%Y-%m-%d %H:%M:%S")
-        trade = make_trade(status="pending", entry=100000.0, sl=95000.0, tps=[105000.0])
+        # Use SHORT with SL well above current price to avoid invalidation
+        # SHORT: SL=105000 > entry=100000, current price ~98700
+        # invalidated = high_price >= sl → 99000 >= 105000 = False
+        # crossed_entry = high_price >= planned_entry → 99000 >= 100000 = False
+        trade = make_trade(status="pending", entry=100000.0, sl=105000.0, tps=[95000.0])
         trade["entered_at"] = old_time
         trade["planned_entry"] = 100000.0
-        # Price is still above entry, not yet crossed
+        trade["signal_type"] = "short"
         paper_engine.state["trades"].append(trade)
 
-        # Run price check — price hasn't crossed entry yet, shouldn't fill
-        run_price_update(paper_engine, "BTC/USDT", 98000.0, 97500.0, 97700.0)
+        # Run price check — price is below entry for SHORT, no crossing or invalidation
+        run_price_update(paper_engine, "BTC/USDT", 99000.0, 98500.0, 98700.0)
 
-        assert trade["status"] == "cancelled"
-        assert "信号时效性" in trade.get("close_reason", "")
+        # NEW BEHAVIOR: signal is NOT cancelled, just flagged as stale
+        assert trade["status"] == "pending", "Signal freshness should NOT cancel — should flag stale"
+        assert trade["signal_stale"] is True, "Trade should be marked as stale"
+        assert trade["signal_stale_since"] is not None, "Stale timestamp should be set"
 
     def test_signal_freshness_skips_fresh_trades(self, paper_engine):
         """Pending trade younger than signal_freshness_hours should NOT be cancelled."""
@@ -2420,6 +2427,88 @@ class TestSignalFreshnessAndReDiagnosis:
         assert len(reviews) == 1
         assert reviews[0]["trade_id"] == "trade-px"
         assert trade["needs_review"] is True
+
+    def test_signal_stale_flagged_without_price_proximity(self, paper_engine):
+        """Stale signal should be flagged even when price is far from entry zone."""
+        paper_engine.state["config"]["signal_freshness_hours"] = 1.0
+        paper_engine.state["config"]["ambush_patience_hours"] = 24.0
+        paper_engine.state["config"]["pending_ttl_hours"] = 24.0
+        paper_engine.state["config"]["pending_review_distance_pct"] = 5.0
+
+        # Entry center is ~100k, current price 110,000 is 10% away (outside 5% review)
+        # Use SHORT with SL above current price to avoid invalidation
+        # SHORT: SL=115000 > entry=100000, current price ~110500
+        # invalidated = high_price >= sl → 111000 >= 115000 = False
+        old_time = (datetime.now() - timedelta(hours=2)).strftime("%Y-%m-%d %H:%M:%S")
+        trade = make_trade(status="pending", entry=100000.0, sl=115000.0, tps=[95000.0])
+        trade["entered_at"] = old_time
+        trade["planned_entry"] = 100000.0
+        trade["signal_type"] = "short"
+        trade["signal_stale"] = False
+        trade["signal_stale_since"] = None
+        paper_engine.state["trades"].append(trade)
+
+        run_price_update(paper_engine, "BTC/USDT", 111000.0, 110000.0, 110500.0)
+
+        # Signal should be stale but NOT flagged for review (price too far from entry)
+        assert trade["signal_stale"] is True, "Trade should be marked as stale"
+        assert trade["signal_stale_since"] is not None
+        assert trade["needs_review"] is False, "Should NOT flag review when price is far from entry zone"
+
+    def test_signal_stale_triggers_review_when_price_near(self, paper_engine):
+        """Stale signal should also trigger re-diagnosis flag when price is near entry zone."""
+        paper_engine.state["config"]["signal_freshness_hours"] = 1.0
+        paper_engine.state["config"]["ambush_patience_hours"] = 24.0
+        paper_engine.state["config"]["pending_ttl_hours"] = 24.0
+        paper_engine.state["config"]["pending_review_distance_pct"] = 5.0
+
+        # Entry center is ~100k, use SHORT so price at 103,000 is within 3% of 100k
+        # For SHORT: entry crosses when high_price >= planned_entry (must be < 100k)
+        # High price 103,500 > 100,000 would cross, so use 101,000 high (just above 100k but not crossing)
+        # Actually for SHORT, crossed_entry = high_price >= planned_entry
+        # 101,000 >= 100,000 = True, so it would fill!
+        # Let me use LONG with price 101,000 (above entry, within 1% of 100k entry)
+        # For LONG: crossed_entry = low_price <= planned_entry
+        # 100,500 > 100,000, so no crossing
+        old_time = (datetime.now() - timedelta(hours=2)).strftime("%Y-%m-%d %H:%M:%S")
+        trade = make_trade(status="pending", entry=100000.0, sl=95000.0, tps=[105000.0])
+        trade["entered_at"] = old_time
+        trade["planned_entry"] = 100000.0
+        trade["signal_type"] = "long"
+        trade["signal_stale"] = False
+        trade["signal_stale_since"] = None
+        trade["needs_review"] = False
+        trade["review_trigger_price"] = None
+        paper_engine.state["trades"].append(trade)
+
+        # Price 101,000 is 1% above entry center 100k (within 5% review distance)
+        # For LONG: low_price=100,500 > planned_entry=100,000 so no crossing
+        run_price_update(paper_engine, "BTC/USDT", 102000.0, 100500.0, 101000.0)
+
+        # Signal should be stale AND flagged for review
+        assert trade["signal_stale"] is True, "Trade should be marked as stale"
+        assert trade["needs_review"] is True, "Should flag review when price is near entry zone"
+        assert trade["review_trigger_price"] == 101000.0
+
+    def test_apply_review_keep_resets_stale(self, paper_engine):
+        """apply_review_result with action='keep' should reset signal_stale flag."""
+        trade = make_trade(status="pending", entry=100000.0, sl=95000.0, tps=[105000.0])
+        trade["needs_review"] = True
+        trade["signal_stale"] = True
+        trade["signal_stale_since"] = "2026-08-12 10:00:00"
+        trade["trade_id"] = "trade-stale-keep"
+        paper_engine.state["trades"] = [trade]
+
+        result = paper_engine.apply_review_result("trade-stale-keep", {
+            "action": "keep",
+            "reason": "市场结构未变，继续持有"
+        })
+
+        assert result["success"] is True
+        assert trade["status"] == "pending"
+        assert trade["needs_review"] is False
+        assert trade["signal_stale"] is False, "Keep should reset stale flag"
+        assert trade["signal_stale_since"] is None, "Keep should clear stale timestamp"
 
 
 # ═══════════════════════════════════════════════════════════════

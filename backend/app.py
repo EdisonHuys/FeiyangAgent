@@ -1495,40 +1495,55 @@ def start_background_monitor():
                         if current_price <= 0:
                             continue
 
-                        log_monitor_event(f"🔍 [再诊断] {symbol} 价格接近吃单区间（${current_price}），启动 LLM 快速再诊断...")
+                        stale_tag = " ⚠️信号已过期" if trade.get("signal_stale") else ""
+                        log_monitor_event(f"🔍 [再诊断] {symbol} 价格接近吃单区间（${current_price}）{stale_tag}，启动 LLM 方向预测再诊断...")
 
-                        # Fetch fresh market data for the re-diagnosis
+                        # Fetch short-term market data for directional prediction
+                        # Use 15min, 30min, 1h specifically for near-term analysis
                         exchange_id = yaml_cfg.get("exchange", "binance")
                         fetcher = get_data_fetcher(exchange_id)
-                        timeframes = yaml_cfg.get("timeframes", ["1M", "1W", "1D", "4h", "1h"])
+                        re_diag_timeframes = ["15m", "30m", "1h"]
                         try:
-                            raw_dfs = fetcher.fetch_all_timeframes(symbol, timeframes, limit=100)
+                            raw_dfs = fetcher.fetch_all_timeframes(symbol, re_diag_timeframes, limit=50)
                             processed_dfs = {}
                             for tf, df in raw_dfs.items():
                                 processed_dfs[tf] = calculate_indicators(df)
                         except Exception as fetch_e:
-                            logger.warning(f"[ReDiagnosis] Failed to fetch data for {symbol}: {fetch_e}")
-                            processed_dfs = {}
+                            logger.warning(f"[ReDiagnosis] Failed to fetch short-term data for {symbol}: {fetch_e}")
+                            log_monitor_event(f"⚠️ [再诊断] {symbol} 获取短期 K 线数据失败，跳过本次再诊断：{fetch_e}")
+                            continue
 
-                        # Build compact market data for quick_confirm
-                        # Use the most recent 4h candles if available
-                        market_data = None
-                        try:
-                            if "4h" in processed_dfs:
-                                df_4h = processed_dfs["4h"]
-                                recent_4h = df_4h.tail(5)
-                                market_data = {
-                                    "close": recent_4h["close"].tolist() if "close" in recent_4h else [],
-                                    "high": recent_4h["high"].tolist() if "high" in recent_4h else [],
-                                    "low": recent_4h["low"].tolist() if "low" in recent_4h else [],
-                                    "volume": recent_4h["volume"].tolist() if "volume" in recent_4h else [],
-                                    "rsi": recent_4h["RSI_14"].tolist() if "RSI_14" in recent_4h else [],
-                                    "ma5": recent_4h["MA5"].tolist() if "MA5" in recent_4h else [],
-                                }
-                        except Exception as md_e:
-                            logger.warning(f"[ReDiagnosis] Failed to build market_data for {symbol}: {md_e}")
+                        # Helper: build compact market data dict for a given timeframe
+                        def _build_market_data(tf_name, processed, tail_n=15):
+                            """Build a compact market data dict from processed indicators."""
+                            df = processed.get(tf_name)
+                            if df is None or len(df) < tail_n:
+                                return None
+                            recent = df.tail(tail_n)
+                            md = {}
+                            for col_base in ["close", "high", "low", "volume"]:
+                                if col_base in recent:
+                                    md[col_base] = recent[col_base].tolist()
+                            for col_base, col_name in [("rsi", "RSI_14"), ("ma5", "MA5"), ("ema21", "EMA21")]:
+                                if col_name in recent:
+                                    md[col_base] = recent[col_name].tolist()
+                            # Ensure at least close data is available
+                            if not md.get("close"):
+                                return None
+                            return md
 
-                        # Build the re-diagnosis payload
+                        # Build market data for each timeframe (15 candles each)
+                        market_data_15m = _build_market_data("15m", processed_dfs, tail_n=15)
+                        market_data_30m = _build_market_data("30m", processed_dfs, tail_n=15)
+                        market_data_1h = _build_market_data("1h", processed_dfs, tail_n=15)
+
+                        # Check that we have at least one timeframe of data
+                        if not market_data_15m and not market_data_30m and not market_data_1h:
+                            logger.warning(f"[ReDiagnosis] No usable market data for {symbol}, skipping re-diagnosis.")
+                            log_monitor_event(f"⚠️ [再诊断] {symbol} 无可用 K 线数据，跳过本次再诊断")
+                            continue
+
+                        # Build the re-diagnosis payload with multi-timeframe market data
                         re_diag_payload = {
                             "symbol": symbol,
                             "current_price": current_price,
@@ -1539,7 +1554,11 @@ def start_background_monitor():
                             "take_profit_targets": trade.get("take_profit_targets", []),
                             "core_reason": trade.get("core_reason", ""),
                             "signal_regime": trade.get("signal_regime", "unknown"),
-                            "market_data": market_data,
+                            "signal_stale": trade.get("signal_stale", False),
+                            "signal_stale_since": trade.get("signal_stale_since", None),
+                            "market_data_15m": market_data_15m,
+                            "market_data_30m": market_data_30m,
+                            "market_data_1h": market_data_1h,
                         }
 
                         # Call the LLM for quick re-diagnosis
@@ -1574,7 +1593,8 @@ def start_background_monitor():
                             new_sig = review_result.get("new_signal_type", "unknown")
                             log_monitor_event(f"🔄 [再诊断] {symbol} 方向反转：{trade['signal_type'].upper()} → {new_sig.upper()}：{reason}")
                         else:
-                            log_monitor_event(f"✅ [再诊断] {symbol} {trade['signal_type'].upper()} 方向确认保持不变：{reason}")
+                            stable_msg = "（信号已过期，LLM 确认方向有效）" if trade.get("signal_stale") else ""
+                            log_monitor_event(f"✅ [再诊断] {symbol} {trade['signal_type'].upper()} 方向确认保持不变{stable_msg}：{reason}")
 
                     except Exception as trade_e:
                         logger.error(f"[ReDiagnosis] Error processing trade {trade.get('trade_id', '?')}: {trade_e}")

@@ -726,12 +726,14 @@ JSON 结构及字段定义：
     def quick_confirm(self, payload):
         """
         Lightweight re-diagnosis for pending trades approaching the entry zone.
-        Asks the LLM whether the original signal direction is still valid given
-        the current market structure.
+        Analyzes short-term market data (15min, 30min, 1H) to predict the
+        expected direction in the next few hours, then decides whether to
+        keep / cancel / reverse the pending order.
 
-        This is a cheaper, focused call compared to the full analyze() — it
-        sends a compact prompt and expects a simple "keep / cancel / reverse"
-        result instead of the full 12-point scoring system.
+        Unlike the full analyze() which does a comprehensive 12-point scoring,
+        this is a focused, fast call that only looks at near-term price action
+        to determine if the original signal direction is still valid at the
+        current price level.
 
         Args:
             payload: dict with keys:
@@ -744,7 +746,11 @@ JSON 结构及字段定义：
                 - "take_profit_targets": [float, ...]
                 - "core_reason": str (original signal reasoning)
                 - "signal_regime": str (original market regime)
-                - "market_data": dict or None (optional, compact OHLCV data if available)
+                - "signal_stale": bool (whether the signal has exceeded freshness_hours)
+                - "signal_stale_since": str or None (when the signal went stale)
+                - "market_data_15m": dict or None (compact OHLCV for 15min candles)
+                - "market_data_30m": dict or None (compact OHLCV for 30min candles)
+                - "market_data_1h": dict or None (compact OHLCV for 1H candles)
 
         Returns:
             dict with keys:
@@ -766,32 +772,93 @@ JSON 结构及字段定义：
         tps = payload.get("take_profit_targets", [])
         core_reason = payload.get("core_reason", "")
         signal_regime = payload.get("signal_regime", "unknown")
+        signal_stale = payload.get("signal_stale", False)
+        signal_stale_since = payload.get("signal_stale_since", None)
 
-        # Build a compact re-diagnosis prompt
+        # Build market data summary for each timeframe
+        def _format_market_data(md, label):
+            """Format a compact market data dict into a readable string."""
+            if not md or not isinstance(md, dict):
+                return f"【{label}】无数据\n"
+            closes = md.get("close", [])
+            highs = md.get("high", [])
+            lows = md.get("low", [])
+            volumes = md.get("volume", [])
+            rsis = md.get("rsi", [])
+            mas = md.get("ma5", [])
+            emas = md.get("ema21", [])
+            if not closes or len(closes) < 3:
+                return f"【{label}】数据不足\n"
+            lines = [f"【{label}】最近 {len(closes)} 根 K 线："]
+            lines.append(f"  价格区间：{min(lows):.4f} - {max(highs):.4f}（当前 ${current_price:.4f}）")
+            lines.append(f"  最近 5 根收盘价：{[round(c, 4) for c in closes[-5:]]}")
+            if rsis and len(rsis) >= 1:
+                lines.append(f"  RSI_14 值：{[round(r, 1) for r in rsis[-5:]]}")
+            if mas and len(mas) >= 1:
+                lines.append(f"  MA5 值：{[round(m, 4) for m in mas[-5:]]}")
+            if emas and len(emas) >= 1:
+                lines.append(f"  EMA21 值：{[round(e, 4) for e in emas[-5:]]}")
+            # Volume trend
+            if volumes and len(volumes) >= 5:
+                recent_vols = volumes[-5:]
+                avg_vol = sum(recent_vols[:-1]) / max(len(recent_vols) - 1, 1)
+                vol_ratio = recent_vols[-1] / max(avg_vol, 0.01)
+                lines.append(f"  成交量：最新={recent_vols[-1]:.0f}，前4根均值={avg_vol:.0f}，倍率={vol_ratio:.2f}x")
+            # Price position relative to entry zone
+            entry_center = (entry_min + entry_max) / 2.0
+            dist_to_entry = (entry_center - current_price) / current_price * 100.0
+            if original_sig == "long":
+                lines.append(f"  距吃单区间：当前价低于区间中心 {abs(dist_to_entry):.2f}%（做多需价格上行 {abs(dist_to_entry):.2f}% 触及区间）")
+            else:
+                lines.append(f"  距吃单区间：当前价高于区间中心 {abs(dist_to_entry):.2f}%（做空需价格下行 {abs(dist_to_entry):.2f}% 触及区间）")
+            return "\n".join(lines)
+
+        # Build the directional prediction prompt
+        md_15m_block = _format_market_data(payload.get("market_data_15m"), "15分钟")
+        md_30m_block = _format_market_data(payload.get("market_data_30m"), "30分钟")
+        md_1h_block = _format_market_data(payload.get("market_data_1h"), "1小时")
+
+        stale_tag = "⚠️ 信号已过期" if signal_stale else "✅ 信号仍在有效期内"
+        if signal_stale and signal_stale_since:
+            stale_tag += f"（{signal_stale_since} 起标记为过期）"
+
         quick_prompt = (
-            f"【再诊断请求】{symbol} 当前价格 ${current_price}\n\n"
-            f"原始信号：{original_sig.upper()}\n"
-            f"原始依据：{core_reason}\n"
-            f"原始市场状态：{signal_regime}\n"
-            f"吃单区间：${entry_min} - ${entry_max}（当前价距区间中心 {abs(current_price - (entry_min + entry_max) / 2.0) / ((entry_min + entry_max) / 2.0) * 100.0:.2f}%）\n"
-            f"止损线：${stop_loss}\n"
-            f"止盈目标：{', '.join([f'${t}' for t in tps])}\n\n"
-            f"请快速判断：当前价格已接近吃单区间，原始信号的方向是否仍然有效？\n\n"
-            f"请严格按以下 JSON 格式输出（不要加 Markdown 代码块标记）：\n"
+            f"【方向预测再诊断】{symbol} 当前价格 ${current_price}\n"
+            f"{stale_tag}\n\n"
+            f"原始信号信息：\n"
+            f"  - 方向：{original_sig.upper()}\n"
+            f"  - 原始依据：{core_reason}\n"
+            f"  - 原始市场状态：{signal_regime}\n"
+            f"  - 吃单区间：${entry_min} - ${entry_max}\n"
+            f"  - 止损线：${stop_loss}\n"
+            f"  - 止盈目标：{', '.join([f'${t}' for t in tps])}\n\n"
+            f"多时间框架市场数据：\n"
+            f"{md_15m_block}\n"
+            f"{md_30m_block}\n"
+            f"{md_1h_block}\n\n"
+            f"【任务】\n"
+            f"请基于以上多时间框架数据，预测 {symbol} 在接下来几小时内的短期走势方向。\n"
+            f"重点分析：\n"
+            f"1. 15分钟 K 线微观结构：近期是否有反转形态（锤子线/流星/吞没）？短期趋势是否发生变化？\n"
+            f"2. 30分钟 K 线中间趋势：中期动能是否支持原始方向？RSI 是否处于超买/超卖区域？\n"
+            f"3. 1小时 K 线短期趋势确认：1小时级别趋势是否与原始信号方向一致？\n"
+            f"4. 成交量分析：最近的成交量是否支持方向判断？是否有放量突破或缩量回调？\n\n"
+            f"然后判断：原始信号的方向在当前市场条件下是否仍然有效？\n\n"
+            f"请严格按以下 JSON 格式输出（不要加 Markdown 代码块标记，只输出纯 JSON）：\n"
             f"{{\n"
             f'  "action": "keep" | "cancel" | "reverse",\n'
             f'  "new_signal_type": "long" | "short"（仅当 action 为 reverse 时必须填）,\n'
-            f'  "new_entry_min": <optional float>,\n'
-            f'  "new_entry_max": <optional float>,\n'
-            f'  "new_stop_loss": <optional float>,\n'
-            f'  "new_take_profit_targets": [<optional float>, ...],\n'
-            f'  "reason": "简短的中文理由，说明为什么 keep / cancel / reverse",\n'
-            f'  "confidence": <int 0-12, 本次再诊断的置信度>\n'
+            f'  "new_entry_min": <optional float，反转时建议的新吃单区间下限>,\n'
+            f'  "new_entry_max": <optional float，反转时建议的新吃单区间上限>,\n'
+            f'  "new_stop_loss": <optional float，反转时建议的新止损价>,\n'
+            f'  "new_take_profit_targets": [<optional float>, ...]（反转时建议的新止盈目标列表）,\n'
+            f'  "reason": "简短的中文理由，说明预测到的短期走势方向以及为什么 keep / cancel / reverse",\n'
+            f'  "confidence": <int 0-12, 本次再诊断基于多时间框架数据的置信度>\n'
             f"}}\n\n"
             f"注意：不要输出任何其他内容，只需输出纯 JSON 对象。"
         )
 
-        logger.info(f"[QuickConfirm] Sending re-diagnosis request for {symbol} (original={original_sig})...")
+        logger.info(f"[QuickConfirm] Sending directional prediction re-diagnosis for {symbol} (original={original_sig}, stale={signal_stale})...")
 
         # Use a lower temperature for more deterministic output
         original_temp = self.temperature
@@ -804,18 +871,23 @@ JSON 结构及字段定义：
                     {
                         "role": "system",
                         "content": (
-                            "你是一个专业的加密货币交易再诊断助手。你的任务是快速判断一个已有交易信号在当前市场条件下是否仍然有效。\n"
-                            "你的判断标准：\n"
-                            "1. keep - 原始方向仍然有效，市场结构未发生根本性变化\n"
-                            "2. cancel - 原始方向已失效，市场结构已变化，不应入场\n"
-                            "3. reverse - 原始方向判断错误，当前市场结构支持相反方向\n\n"
-                            "注意：默认情况下应倾向于 keep，除非有明确的证据表明市场结构发生了根本性变化。"
+                            "你是一个专业的加密货币短期方向预测助手。你的任务是基于多时间框架 K 线数据（15分钟、30分钟、1小时）"
+                            "预测某个币种在接下来几小时内的短期走势方向，并据此判断一个已有的埋伏交易信号是否应该继续持有、取消或反转方向。\n\n"
+                            "你的分析框架：\n"
+                            "1. 15分钟（微观结构）：查看近期 K 线形态、短期支撑阻力、即时动能。\n"
+                            "2. 30分钟（中间趋势）：查看中期趋势方向、RSI 超买超卖、成交量变化。\n"
+                            "3. 1小时（短期趋势确认）：确认1小时级别的趋势是否与原始信号方向一致。\n\n"
+                            "判断标准：\n"
+                            "- keep：短期走势方向与原始信号方向一致，价格有较大概率向吃单区间移动。\n"
+                            "- cancel：短期走势方向与原始信号方向相反或不确定，市场结构已发生明显变化，不应入场。\n"
+                            "- reverse：短期走势方向明确与原始信号方向相反，市场结构已反转，应反向操作。\n\n"
+                            "注意：你的判断应基于数据和形态分析，不要主观臆测。如果数据不足或信号不明确，倾向于 keep 保持当前方向。"
                         )
                     },
                     {"role": "user", "content": quick_prompt}
                 ],
                 temperature=self.temperature,
-                max_tokens=500
+                max_tokens=800
             )
 
             content = response.choices[0].message.content.strip()

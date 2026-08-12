@@ -95,9 +95,12 @@ class SniperEngine:
                 },
                 # Per-trade max loss as % of margin before force-close
                 "max_trade_loss_percent": 50.0,
-                # ⏰ Signal freshness: pending orders older than this are auto-cancelled
-                # Shorter than pending_ttl_hours because a stale signal is unreliable
+                # ⏰ Signal freshness: pending orders older than this trigger re-diagnosis
+                # (was: auto-cancel; now: flag for LLM review instead of hard cancel)
                 "signal_freshness_hours": 4.0,
+                # 🕐 Ambush patience: max hours a pending order stays valid before hard expiry
+                # Same as pending_ttl_hours by default — controls how long we wait for an ambush
+                "ambush_patience_hours": 24.0,
                 # 🔍 Re-diagnosis: when price is within this % of entry zone, trigger review
                 "pending_review_distance_pct": 5.0,
                 # ⏱️ Re-diagnosis cooldown: minimum minutes between reviews for same trade
@@ -2294,7 +2297,9 @@ class SniperEngine:
             "signal_regime": json_signal.get("market_regime", "unknown"),
             "needs_review": False,
             "last_review_time": None,
-            "review_trigger_price": None
+            "review_trigger_price": None,
+            "signal_stale": False,
+            "signal_stale_since": None
         }
 
         if instant_fill and not new_trade.get("is_live"):
@@ -2684,32 +2689,37 @@ class SniperEngine:
                         logger.info(f"[SniperEngine] Pending order for {symbol} expired after {round(age_hours, 1)}h.")
                         continue
 
-                # ⏰ Signal freshness: cancel pending orders whose signal is too old
-                # Shorter than pending_ttl_hours — a stale signal is unreliable even if the
-                # order hasn't expired yet. The market structure that generated the original
-                # signal may have shifted, making the original direction invalid.
+                # ⏰ Signal freshness: flag stale signals for re-diagnosis instead of hard cancel
+                # A stale signal (> freshness_hours) does NOT cancel the order — it just marks
+                # the trade for LLM review. The re-diagnosis thread (app.py) will check the
+                # current market structure and decide keep/cancel/reverse when price approaches
+                # the entry zone. This preserves the 24h ambush patience while ensuring the
+                # direction is still valid.
                 freshness_hours = float(cfg.get("signal_freshness_hours", 4.0))
-                if freshness_hours > 0 and ttl_hours > 0 and freshness_hours < ttl_hours:
+                ambush_patience_hours = float(cfg.get("ambush_patience_hours", 24.0))
+                # Only apply freshness check if freshness < ambush patience (meaningful distinction)
+                if freshness_hours > 0 and ambush_patience_hours > 0 and freshness_hours < ambush_patience_hours:
                     try:
                         entered_dt = datetime.strptime(t.get("entered_at", ""), "%Y-%m-%d %H:%M:%S")
                         age_hours = (datetime.now() - entered_dt).total_seconds() / 3600.0
                     except Exception:
                         age_hours = 0.0
-                    if age_hours > freshness_hours:
-                        if t.get("is_live") and t.get("live_order_id"):
-                            try:
-                                exchange, ex_id = self._init_live_ccxt()
-                                ccxt_symbol = f"{symbol}:USDT" if ":" not in symbol else symbol
-                                exchange.cancel_order(t["live_order_id"], ccxt_symbol)
-                                logger.info(f"[LiveSniper] Signal freshness cancel issued for {symbol} after {round(age_hours, 1)}h (freshness={freshness_hours}h).")
-                            except Exception as e:
-                                logger.warning(f"[LiveSniper] Signal freshness cancel failed for {symbol}: {e} — 保留挂单，下一 tick 重试")
-                                continue
-                        t["status"] = "cancelled"
-                        t["close_reason"] = f"⏰ 信号时效性过期（{int(age_hours)}h > {int(freshness_hours)}h），市场结构可能已变化，自动撤单等待新信号"
+                    if age_hours > freshness_hours and not t.get("signal_stale"):
+                        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        t["signal_stale"] = True
+                        t["signal_stale_since"] = now_str
+                        # Flag for re-diagnosis if price is near entry zone, so the background
+                        # thread picks it up on the next cycle
+                        entry_center = (entry_min + entry_max) / 2.0
+                        entry_dist_pct = abs(current_price - entry_center) / entry_center * 100.0
+                        review_distance_pct = float(cfg.get("pending_review_distance_pct", 5.0))
+                        if entry_dist_pct <= review_distance_pct:
+                            t["needs_review"] = True
+                            t["review_trigger_price"] = current_price
                         updated = True
-                        logger.info(f"[SniperEngine] Signal freshness expired for {symbol}: {round(age_hours, 1)}h > {freshness_hours}h.")
-                        continue
+                        logger.info(f"[SniperEngine] Signal stale for {symbol}: {round(age_hours, 1)}h > {freshness_hours}h. "
+                                    f"Flagged for re-diagnosis (price dist={round(entry_dist_pct, 2)}%). "
+                                    f"Order preserved for ambush patience ({ambush_patience_hours}h).")
 
                 # 🔍 Re-diagnosis: when price approaches the entry zone, flag the
                 # pending trade for LLM review. The market structure may have
@@ -3240,6 +3250,8 @@ class SniperEngine:
                         "entered_at": t.get("entered_at", ""),
                         "leverage": t.get("leverage", 0),
                         "margin_usd": t.get("margin_usd", 0.0),
+                        "signal_stale": t.get("signal_stale", False),
+                        "signal_stale_since": t.get("signal_stale_since", None),
                     })
 
             return reviews
@@ -3280,6 +3292,10 @@ class SniperEngine:
             # Reset the review flag regardless of action
             target["needs_review"] = False
             target["last_review_time"] = now_str
+            # If LLM confirms the trade (keep), also reset the stale flag
+            if action == "keep":
+                target["signal_stale"] = False
+                target["signal_stale_since"] = None
 
             if action == "cancel":
                 # Cancel the pending trade
@@ -3346,6 +3362,7 @@ class SniperEngine:
                 return {"success": True, "message": f"Trade reversed {old_sig_type.upper()} → {new_sig_type.upper()}: {reason}"}
 
             else:  # "keep" — proceed with the original plan
+                stale_info = "信号已过期，LLM 确认方向有效，继续埋伏" if target.get("signal_stale_since") else ""
                 target["close_reason"] = f"🔍 LLM 再诊断后确认方向不变：{reason}"
                 self._save_state()
                 logger.info(f"[SniperEngine] Re-diagnosis confirmed trade {trade_id} ({target['symbol']}): {reason}")
