@@ -791,6 +791,70 @@ class TestCorrelationCheck:
         assert result is None
 
 
+class TestStopLossClamping:
+    """Test leverage-aware stop-loss clamping."""
+
+    def _setup(self, paper_engine):
+        today = datetime.now().strftime("%Y-%m-%d")
+        paper_engine.state["daily"] = {
+            "date": today, "start_balance_paper": 10000.0, "halted_paper": False,
+        }
+        paper_engine.state["config"]["max_trade_loss_percent"] = 30.0
+        paper_engine.state["config"]["max_leverage"] = 50
+        paper_engine.state["config"]["min_confidence"] = 7
+
+    def test_long_sl_tightened(self, paper_engine):
+        """LONG SL should be tightened when distance exceeds max_trade_loss_percent / leverage."""
+        self._setup(paper_engine)
+        json_signal = {
+            "signal_type": "long", "confidence_score": 9,
+            "entry_zone": {"min": 100000, "max": 100500},
+            "stop_loss": 95000,  # 5% below entry → 250% loss at 50x, way over 30% limit
+            "take_profit_targets": [105000, 110000],
+            "risk_reward_ratio": 2.0,
+        }
+        result = paper_engine.process_new_signal("BTC/USDT", 102000, json_signal, "")
+        assert result is not None, "Signal should be accepted with tightened SL"
+        t = paper_engine.state["trades"][0]
+        # SL should be tightened from 95000 to around 99850 (0.4% below entry)
+        assert t["stop_loss"] > 95000, f"SL should be tightened from 95000, got {t['stop_loss']}"
+        assert t["stop_loss"] < 100000, f"SL should still be below entry, got {t['stop_loss']}"
+
+    def test_short_sl_tightened(self, paper_engine):
+        """SHORT SL should be tightened when distance exceeds max_trade_loss_percent / leverage."""
+        self._setup(paper_engine)
+        json_signal = {
+            "signal_type": "short", "confidence_score": 9,
+            "entry_zone": {"min": 100000, "max": 100500},
+            "stop_loss": 105000,  # 5% above entry → 250% loss at 50x
+            "take_profit_targets": [95000, 90000],
+            "risk_reward_ratio": 2.0,
+        }
+        result = paper_engine.process_new_signal("BTC/USDT", 98000, json_signal, "")
+        assert result is not None, "Signal should be accepted with tightened SL"
+        t = paper_engine.state["trades"][0]
+        # SL should be tightened from 105000 to around 100900 (0.4% above entry)
+        assert t["stop_loss"] < 105000, f"SL should be tightened from 105000, got {t['stop_loss']}"
+        assert t["stop_loss"] > 100500, f"SL should still be above entry, got {t['stop_loss']}"
+
+    def test_normal_sl_not_tightened(self, paper_engine):
+        """SL within max_trade_loss_percent limit should NOT be tightened."""
+        self._setup(paper_engine)
+        # planned_entry ≈ 100212, max_sl_distance = 0.4% = ~400
+        # SL at 99900 is ~0.31% below planned_entry → 15.5% loss at 50x, within 30% limit
+        json_signal = {
+            "signal_type": "long", "confidence_score": 9,
+            "entry_zone": {"min": 100000, "max": 100500},
+            "stop_loss": 99900,
+            "take_profit_targets": [105000, 110000],
+            "risk_reward_ratio": 2.0,
+        }
+        result = paper_engine.process_new_signal("BTC/USDT", 102000, json_signal, "")
+        assert result is not None
+        t = paper_engine.state["trades"][0]
+        assert t["stop_loss"] == 99900, f"SL should not be tightened, got {t['stop_loss']}"
+
+
 class TestFundingFeeModel:
     """Test funding fee model."""
 
