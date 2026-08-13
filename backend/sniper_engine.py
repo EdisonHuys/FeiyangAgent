@@ -317,6 +317,10 @@ class SniperEngine:
         an exchange-side stop keeps the position protected through app
         crashes, sleep and network drops. Failures trigger a loud push so
         the user can set the stop manually.
+
+        The SL price is computed from max_trade_loss_percent + actual leverage
+        to ensure the exchange never triggers a stop that exceeds our max loss
+        limit. The passed-in stop_loss serves as a reference / technical floor.
         """
         if not stop_loss or amount <= 0:
             return None
@@ -325,6 +329,42 @@ class SniperEngine:
         if not cfg.get("enable_exchange_sl", True):
             logger.info(f"[LiveSniper] 交易所侧同步挂止损单已根据设置关闭 ({symbol})")
             return None
+
+        # 🛡️ PnL-based SL price: use max_trade_loss_percent + actual leverage
+        max_loss_pct = float(cfg.get("max_trade_loss_percent", 30.0))
+        # Look up the trade to get actual entry price and leverage
+        entry_price = None
+        leverage = float(cfg.get("max_leverage", 50))
+        for t in self.state.get("trades", []):
+            if t["symbol"] == symbol and t.get("signal_type", "").lower() == sig_type.lower():
+                ae = t.get("actual_entry")
+                if ae and float(ae) > 0:
+                    entry_price = float(ae)
+                lev = t.get("leverage")
+                if lev and float(lev) > 0:
+                    leverage = float(lev)
+                break
+
+        if entry_price and entry_price > 0 and leverage > 0:
+            # Calculate PnL-safe SL: max_loss_pct / leverage = max price distance %
+            max_sl_distance_pct = max_loss_pct / leverage / 100.0
+            # Reserve 0.15% for fees/slippage
+            max_sl_distance_pct = max(max_sl_distance_pct - 0.0015, 0.002)
+            if sig_type == "long":
+                pnl_safe_sl = entry_price * (1 - max_sl_distance_pct)
+                # Use the tighter SL (higher price for LONG = closer to entry)
+                use_sl = max(stop_loss, pnl_safe_sl)
+            else:
+                pnl_safe_sl = entry_price * (1 + max_sl_distance_pct)
+                # Use the tighter SL (lower price for SHORT = closer to entry)
+                use_sl = min(stop_loss, pnl_safe_sl)
+            if abs(use_sl - stop_loss) / stop_loss > 0.001:
+                logger.info(
+                    f"[LiveSniper] 🛡️ [{symbol}] PnL止损计算: "
+                    f"原SL=${stop_loss}, PnL安全SL=${pnl_safe_sl} ({max_loss_pct}%/{leverage}x), "
+                    f"实际使用=${use_sl}"
+                )
+            stop_loss = use_sl
 
         ccxt_symbol = f"{symbol}:USDT" if ":" not in symbol else symbol
         close_side = "sell" if sig_type == "long" else "buy"
@@ -2336,62 +2376,11 @@ class SniperEngine:
         if not tp_list or sl <= 0:
             return None
 
-        # 🛡️ Leverage-aware stop-loss clamping: ensure SL distance doesn't exceed max_trade_loss_percent
-        # With 50x leverage, a 1% SL distance = 50% margin loss. We must tighten SL to respect risk limits.
-        max_loss_pct = float(cfg.get("max_trade_loss_percent", 30.0))
-        # Estimate leverage for this trade (use max_leverage as worst case for SL clamping)
-        est_lev = float(cfg.get("max_leverage", 50))
-        # Max allowed SL distance as % of entry price
-        max_sl_distance_pct = max_loss_pct / est_lev / 100.0  # e.g. 30/50/100 = 0.006 (0.6%)
-        # Add small buffer for fees/slippage (0.2%)
-        max_sl_distance_pct = max(max_sl_distance_pct - 0.002, 0.003)  # floor at 0.3%
-
-        if sig_type == "long":
-            sl_distance_pct = (planned_entry - sl) / planned_entry
-            if sl_distance_pct > max_sl_distance_pct:
-                old_sl = sl
-                sl = round(planned_entry * (1 - max_sl_distance_pct), 6)
-                logger.info(
-                    f"[SniperEngine] 🛡️ [{symbol}] LONG 止损收紧: "
-                    f"原 SL ${old_sl} (距离 {sl_distance_pct*100:.2f}%, {est_lev}x杠杆={sl_distance_pct*est_lev*100:.1f}%亏损) "
-                    f"→ 新 SL ${sl} (距离 {max_sl_distance_pct*100:.2f}%, 亏损上限 {max_loss_pct}%)"
-                )
-                try:
-                    from app import log_monitor_event
-                    log_monitor_event(f"🛡️ [{symbol}] LONG 止损收紧: 原${old_sl}→${sl} (杠杆{est_lev}x, 亏损限制{max_loss_pct}%)")
-                except Exception: pass
-        else:  # short
-            sl_distance_pct = (sl - planned_entry) / planned_entry
-            if sl_distance_pct > max_sl_distance_pct:
-                old_sl = sl
-                sl = round(planned_entry * (1 + max_sl_distance_pct), 6)
-                logger.info(
-                    f"[SniperEngine] 🛡️ [{symbol}] SHORT 止损收紧: "
-                    f"原 SL ${old_sl} (距离 {sl_distance_pct*100:.2f}%, {est_lev}x杠杆={sl_distance_pct*est_lev*100:.1f}%亏损) "
-                    f"→ 新 SL ${sl} (距离 {max_sl_distance_pct*100:.2f}%, 亏损上限 {max_loss_pct}%)"
-                )
-                try:
-                    from app import log_monitor_event
-                    log_monitor_event(f"🛡️ [{symbol}] SHORT 止损收紧: 原${old_sl}→${sl} (杠杆{est_lev}x, 亏损限制{max_loss_pct}%)")
-                except Exception: pass
-
-        # If SL was tightened, it may now be inside the entry zone — adjust entry zone to maintain geometry
-        if sig_type == "long" and sl >= entry_min:
-            # Move entry_min below the tightened SL to maintain SL < entry_min geometry
-            old_entry_max = entry_max
-            entry_min = round(sl * 0.998, 6)  # 0.2% below SL
-            # Keep entry_max as-is if it's still above the new entry_min, otherwise widen
-            if entry_max <= entry_min:
-                entry_max = round(entry_min * 1.002, 6)  # 0.2% above new entry_min
-            planned_entry = dynamic_round_price((entry_min + entry_max) / 2.0)
-            logger.info(f"[SniperEngine] [{symbol}] LONG 入场区调整以适应收紧止损: entry_min={entry_min}, entry_max={entry_max}")
-        elif sig_type == "short" and sl <= entry_max:
-            # Move entry_max above the tightened SL to maintain SL > entry_max geometry
-            entry_max = round(sl * 1.002, 6)  # 0.2% above SL
-            if entry_min >= entry_max:
-                entry_min = round(entry_max * 0.998, 6)  # 0.2% below new entry_max
-            planned_entry = dynamic_round_price((entry_min + entry_max) / 2.0)
-            logger.info(f"[SniperEngine] [{symbol}] SHORT 入场区调整以适应收紧止损: entry_min={entry_min}, entry_max={entry_max}")
+        # 🛡️ PnL-based stop-loss is enforced at order-placement time (not here).
+        # The exchange SL order is placed at a PnL-safe price computed from
+        # max_trade_loss_percent + actual leverage, so the exchange never
+        # triggers a stop that exceeds our max loss limit. The LLM's original
+        # SL price stays in the trade record for reference / analysis.
 
         # 🛡️ Hard signal-geometry validation.
         if sig_type == "long":
