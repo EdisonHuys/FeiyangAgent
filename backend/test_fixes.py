@@ -410,14 +410,14 @@ class TestP1DefaultValues:
 
     def test_max_trade_loss_percent_default(self, paper_engine):
         del paper_engine.state["config"]["max_trade_loss_percent"]
-        assert paper_engine.state["config"].get("max_trade_loss_percent", 30.0) == 30.0
+        assert paper_engine.state["config"].get("max_trade_loss_percent", 50.0) == 50.0
 
     def test_max_trade_loss_percent_in_default_config(self):
         from sniper_engine import SniperEngine
         tmpdir = tempfile.mkdtemp()
         engine = SniperEngine(tmpdir)
         assert "max_trade_loss_percent" in engine.state["config"]
-        assert engine.state["config"]["max_trade_loss_percent"] == 30.0
+        assert engine.state["config"]["max_trade_loss_percent"] == 50.0
         import shutil
         shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -799,7 +799,7 @@ class TestStopLossClamping:
         paper_engine.state["daily"] = {
             "date": today, "start_balance_paper": 10000.0, "halted_paper": False,
         }
-        paper_engine.state["config"]["max_trade_loss_percent"] = 30.0
+        paper_engine.state["config"]["max_trade_loss_percent"] = 50.0
         paper_engine.state["config"]["max_leverage"] = 50
         paper_engine.state["config"]["min_confidence"] = 7
 
@@ -1311,30 +1311,78 @@ class TestWickPnlBreach:
     """Test that wick-based PnL breach detects gap-through scenarios."""
 
     def test_wick_breach_triggers_sl_long(self, paper_engine):
-        """LONG: If wick penetrates max loss but close recovers, position should still be closed."""
+        """LONG: Moderate wick breach requires 2-tick confirmation before closing."""
         # Use high leverage (50x) so a 1.1% wick dip = 55% loss (exceeds 50% threshold)
         trade = make_trade(sig_type="long", entry=100000, sl=98000, tps=[103000],
                            amount=0.01, lev=50, margin=20.0)
         paper_engine.state["trades"] = [trade]
-        # low=98900 is 1.1% below entry = 55% loss on 50x, triggers wick breach
+        # low=98900 is 1.1% below entry = 55% loss on 50x, triggers moderate wick breach
         # close=99500 is only 25% loss at close, but wick breached threshold
+        # First tick: detection only (confirmation required for moderate wick)
         run_price_update(paper_engine, "BTC/USDT", 100200, 98900, 99500)
+        updated = paper_engine.state["trades"][0]
+        assert updated.get("wick_breach_confirmed") == True, \
+            "First moderate wick breach should mark for confirmation, not close"
+        assert updated["status"] == "filled", \
+            f"Position should NOT close on first moderate wick, got {updated['status']}"
 
+        # Second tick: wick persists → confirmed → close
+        run_price_update(paper_engine, "BTC/USDT", 100200, 98900, 99500)
         updated = paper_engine.state["trades"][0]
         assert updated["status"] == "closed_sl", \
-            f"Wick breach should trigger SL close, got {updated['status']}"
+            f"Confirmed wick breach should trigger SL close, got {updated['status']}"
+
+    def test_severe_wick_breach_immediate_close_long(self, paper_engine):
+        """LONG: Severe wick (>1.5x threshold) should close immediately without confirmation."""
+        trade = make_trade(sig_type="long", entry=100000, sl=95000, tps=[103000],
+                           amount=0.01, lev=50, margin=20.0)
+        paper_engine.state["trades"] = [trade]
+        # low=98500 is 1.5% below entry = 75% loss on 50x, equals 1.5x threshold (50% * 1.5 = 75%)
+        # Severe wick → immediate close, no confirmation needed
+        run_price_update(paper_engine, "BTC/USDT", 100200, 98500, 99800)
+        updated = paper_engine.state["trades"][0]
+        assert updated["status"] == "closed_sl", \
+            f"Severe wick should trigger immediate close, got {updated['status']}"
+
+    def test_moderate_wick_resets_on_recovery(self, paper_engine):
+        """LONG: If moderate wick breach doesn't persist, confirmation flag resets."""
+        trade = make_trade(sig_type="long", entry=100000, sl=98000, tps=[103000],
+                           amount=0.01, lev=50, margin=20.0)
+        paper_engine.state["trades"] = [trade]
+        # First tick: moderate wick breach
+        run_price_update(paper_engine, "BTC/USDT", 100200, 98900, 99500)
+        updated = paper_engine.state["trades"][0]
+        assert updated.get("wick_breach_confirmed") == True
+        assert updated["status"] == "filled"
+
+        # Second tick: price recovers well above entry, no wick breach → flag resets
+        # low must stay above breakeven SL (100000) to avoid SL trigger from trailing stop
+        run_price_update(paper_engine, "BTC/USDT", 100500, 100100, 100300)
+        updated = paper_engine.state["trades"][0]
+        assert updated.get("wick_breach_confirmed") == False, \
+            "Wick breach flag should reset when price recovers"
+        assert updated["status"] == "filled", \
+            f"Position should remain open after recovery, got {updated['status']}"
 
     def test_wick_breach_triggers_sl_short(self, paper_engine):
-        """SHORT: If wick penetrates max loss but close recovers, position should still be closed."""
+        """SHORT: Moderate wick breach requires 2-tick confirmation before closing."""
         trade = make_trade(sig_type="short", entry=100000, sl=102000, tps=[97000],
                            amount=0.01, lev=50, margin=20.0)
         paper_engine.state["trades"] = [trade]
-        # high=101100 is 1.1% above entry = 55% loss on 50x, triggers wick breach
+        # high=101100 is 1.1% above entry = 55% loss on 50x, triggers moderate wick breach
+        # First tick: detection only
         run_price_update(paper_engine, "BTC/USDT", 101100, 99800, 100500)
+        updated = paper_engine.state["trades"][0]
+        assert updated.get("wick_breach_confirmed") == True, \
+            "First moderate wick breach should mark for confirmation"
+        assert updated["status"] == "filled", \
+            f"Position should NOT close on first moderate wick, got {updated['status']}"
 
+        # Second tick: wick persists → confirmed → close
+        run_price_update(paper_engine, "BTC/USDT", 101100, 99800, 100500)
         updated = paper_engine.state["trades"][0]
         assert updated["status"] == "closed_sl", \
-            f"Wick breach should trigger SL close, got {updated['status']}"
+            f"Confirmed wick breach should trigger SL close, got {updated['status']}"
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1455,8 +1503,14 @@ class TestMaxTradeLossKeyName:
         paper_engine.state["trades"] = [trade]
         # low=99350 is 0.65% below entry = 32.5% loss on 50x, exceeds 30% threshold
         # With the old bug (always using 50%), this would NOT trigger
+        # First tick: moderate wick breach — detection only (confirmation required)
         run_price_update(paper_engine, "BTC/USDT", 100200, 99350, 99600)
+        updated = paper_engine.state["trades"][0]
+        assert updated.get("wick_breach_confirmed") == True, \
+            "Should detect wick breach with custom 30% threshold"
 
+        # Second tick: wick persists → confirmed → close
+        run_price_update(paper_engine, "BTC/USDT", 100200, 99350, 99600)
         updated = paper_engine.state["trades"][0]
         assert updated["status"] == "closed_sl", \
             f"Custom max_trade_loss_percent=30 should trigger at 32.5% loss, got {updated['status']}"

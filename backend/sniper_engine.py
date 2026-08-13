@@ -94,7 +94,7 @@ class SniperEngine:
                     "ZAMA/USDT": 1.6
                 },
                 # Per-trade max loss as % of margin before force-close
-                "max_trade_loss_percent": 30.0,
+                "max_trade_loss_percent": 50.0,
                 # ⏰ Signal freshness: pending orders older than this trigger re-diagnosis
                 # (was: auto-cancel; now: flag for LLM review instead of hard cancel)
                 "signal_freshness_hours": 4.0,
@@ -331,7 +331,7 @@ class SniperEngine:
             return None
 
         # 🛡️ PnL-based SL price: use max_trade_loss_percent + actual leverage
-        max_loss_pct = float(cfg.get("max_trade_loss_percent", 30.0))
+        max_loss_pct = float(cfg.get("max_trade_loss_percent", 50.0))
         # Look up the trade to get actual entry price and leverage
         entry_price = None
         leverage = float(cfg.get("max_leverage", 50))
@@ -348,8 +348,9 @@ class SniperEngine:
         if entry_price and entry_price > 0 and leverage > 0:
             # Calculate PnL-safe SL: max_loss_pct / leverage = max price distance %
             max_sl_distance_pct = max_loss_pct / leverage / 100.0
-            # Reserve 0.15% for fees/slippage
-            max_sl_distance_pct = max(max_sl_distance_pct - 0.0015, 0.002)
+            # Reserve 0.15% for fees/slippage, with a minimum 0.5% distance to prevent
+            # ultra-tight stops on high leverage that get triggered by normal market noise
+            max_sl_distance_pct = max(max_sl_distance_pct - 0.0015, 0.005)
             if sig_type == "long":
                 pnl_safe_sl = entry_price * (1 - max_sl_distance_pct)
                 # Use the tighter SL (higher price for LONG = closer to entry)
@@ -1398,7 +1399,7 @@ class SniperEngine:
                     self._closed_external_symbols = {s: exp for s, exp in self._closed_external_symbols.items() if exp > _now}
 
                     cfg = self.state.get("config", {})
-                    max_loss_pct = float(cfg.get("max_trade_loss_percent", 30.0))
+                    max_loss_pct = float(cfg.get("max_trade_loss_percent", 50.0))
                     for (symbol, side), pos in real_pos_map.items():
                         # Skip if this symbol was manually closed and tombstone hasn't expired
                         if symbol in self._closed_external_symbols:
@@ -1408,7 +1409,8 @@ class SniperEngine:
                         entry_px = pos["entry_price"]
                         lev = pos["leverage"] or 1
                         # Auto-calculate a percentage-based SL (local safety net)
-                        sl_dist_pct = max_loss_pct / 100.0 / lev
+                        # Minimum 0.5% distance to prevent ultra-tight stops on high leverage
+                        sl_dist_pct = max(max_loss_pct / 100.0 / lev, 0.005)
                         if pos["side"] == "long":
                             auto_sl = round(entry_px * (1 - sl_dist_pct), 6)
                         else:
@@ -3158,7 +3160,7 @@ class SniperEngine:
 
             # 🛡️ PnL-based risk control (风控用实际盈亏做风控)
             # Check BOTH close-based PnL AND worst-case (wick-based) PnL to catch gap-through scenarios
-            max_trade_loss_pct = float(cfg.get("max_trade_loss_percent", cfg.get("max_trade_loss_pct", 30.0)))
+            max_trade_loss_pct = float(cfg.get("max_trade_loss_percent", cfg.get("max_trade_loss_pct", 50.0)))
             if sig_type == "long":
                 worst_price = low_price
                 worst_pnl_pct = (worst_price - actual_entry) / actual_entry * lev * 100.0
@@ -3167,6 +3169,38 @@ class SniperEngine:
                 worst_pnl_pct = (actual_entry - worst_price) / actual_entry * lev * 100.0
             pnl_breached = (float_pct * 100.0 <= -max_trade_loss_pct) or (worst_pnl_pct <= -max_trade_loss_pct)
             wick_breach = worst_pnl_pct <= -max_trade_loss_pct and (float_pct * 100.0 > -max_trade_loss_pct)
+
+            # 🛡️ Wick breach confirmation: moderate wick-only breaches (close price still safe)
+            # require 2 consecutive ticks to confirm before closing. This prevents momentary
+            # price spikes (插针) from triggering unnecessary closes on tight high-leverage stops.
+            # Severe wick breaches (>1.5x threshold) and close-based breaches close immediately.
+            if wick_breach:
+                severe_wick = worst_pnl_pct <= -max_trade_loss_pct * 1.5
+                if not severe_wick:
+                    if not t.get("wick_breach_confirmed"):
+                        t["wick_breach_confirmed"] = True
+                        logger.info(
+                            f"[SniperEngine] [{symbol}] 影线风控初次触发 "
+                            f"(worst PnL: {round(worst_pnl_pct, 1)}%, 阈值: -{max_trade_loss_pct}%)，"
+                            f"等待下一根K线确认后再平仓"
+                        )
+                        pnl_breached = False
+                        wick_breach = False
+                    else:
+                        logger.info(
+                            f"[SniperEngine] [{symbol}] 影线风控确认触发 "
+                            f"(连续两根K线触及风控阈值 -{max_trade_loss_pct}%)"
+                        )
+                        # pnl_breached stays True — confirmed, close now
+                else:
+                    t["wick_breach_confirmed"] = False
+                    logger.info(
+                        f"[SniperEngine] [{symbol}] 影线风控严重触发 "
+                        f"(worst PnL: {round(worst_pnl_pct, 1)}% > 1.5x阈值 -{max_trade_loss_pct * 1.5}%)，立即平仓"
+                    )
+                    # pnl_breached stays True — severe wick, close immediately
+            else:
+                t["wick_breach_confirmed"] = False
 
             if sig_type == "long":
                 if low_price <= sl or pnl_breached:
