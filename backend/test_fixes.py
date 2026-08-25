@@ -930,8 +930,8 @@ class TestTP1SLNoRegression:
 
         t = paper_engine.state["trades"][0]
         assert t["status"] == "tp1_hit"
-        assert t["stop_loss"] == 100000, \
-            f"SL should be at breakeven without trailing stop, got {t['stop_loss']}"
+        assert t["stop_loss"] >= 100000, \
+            f"SL should be at fee-protected breakeven (>= 100000), got {t['stop_loss']}"
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -2021,17 +2021,12 @@ class TestAutoAdoptExternal:
                     with patch.object(tmp_engine, '_place_live_protective_sl', return_value="sl_002"):
                         trades = tmp_engine.get_trades(mode_filter="live")
 
-        # Should have reopened the existing trade, not created a new one
-        assert len(trades) == 1
-        assert trades[0]["id"] == "trade-1786189680143", "Should reopen existing trade, not create new"
-        assert trades[0]["status"] == "filled", f"Should be reopened as filled, got {trades[0]['status']}"
-        assert trades[0]["closed_at"] is None
-        assert trades[0].get("auto_adopted") is True
-        assert not trades[0].get("is_external")
-
-        # Should NOT have created a duplicate
-        all_zec_trades = [t for t in tmp_engine.state["trades"] if t["symbol"] == "ZEC/USDT"]
-        assert len(all_zec_trades) == 1, "Should not create duplicate trade"
+        # Should create a clean new adopted trade, NOT resurrect stale closed trade
+        assert len(trades) == 2
+        active_trade = [t for t in trades if t["status"] == "filled"][0]
+        assert active_trade["id"].startswith("trade-adopted-")
+        assert active_trade["status"] == "filled"
+        assert active_trade.get("auto_adopted") is True
 
     def test_no_external_labels_after_adopt(self, tmp_engine):
         """After auto-adoption, no trades should have is_external flag."""
@@ -2685,9 +2680,380 @@ class TestSignalFreshnessAndReDiagnosis:
         assert trade["signal_stale_since"] is None, "Keep should clear stale timestamp"
 
 
+class TestGhostPositionFiltering:
+    def test_ghost_position_ignored_when_contracts_zero(self, tmp_engine):
+        """Binance returns stale entryPrice even after position is closed (contracts=0, notional=0).
+        This must NOT be parsed as an open position."""
+        mock_exchange = MagicMock()
+        mock_exchange.fapiPrivateV2GetPositionRisk.return_value = []
+        mock_exchange.fetch_positions.return_value = [
+            {
+                "symbol": "ZEC/USDT:USDT",
+                "contracts": 0.0,
+                "notional": 0.0,
+                "entryPrice": 497.14,
+                "side": "sell",
+                "markPrice": 499.20,
+                "unrealizedPnl": 0.0,
+                "info": {
+                    "positionAmt": "0.000",
+                    "entryPrice": "497.14000",
+                    "isolatedWallet": "0.8072",
+                }
+            }
+        ]
+
+        with patch.object(tmp_engine, '_init_live_ccxt', return_value=(mock_exchange, "binance")):
+            positions = tmp_engine._fetch_live_positions()
+
+        assert positions == [], f"Expected empty positions for closed trade, got: {positions}"
+
+
+class TestOrderbookSnappingAndKnifeProtection:
+    def test_orderbook_snapping_long(self, tmp_engine):
+        """Test LONG limit order snaps to 1 tick in front of the largest bid wall."""
+        mock_exchange = MagicMock()
+        mock_exchange.fetch_order_book.return_value = {
+            "bids": [
+                [64500.0, 1.2],
+                [64450.0, 25.8],  # <-- Largest buy wall in entry zone
+                [64400.0, 3.4],
+            ],
+            "asks": [
+                [64600.0, 5.0]
+            ]
+        }
+        mock_exchange.market.return_value = {"precision": {"price": 1}}
+
+        snapped = tmp_engine._snap_entry_to_orderbook_wall(
+            mock_exchange, "BTC/USDT:USDT", "long", 64480.0, 64400.0, 64600.0
+        )
+        # Snapped price should be 64450.0 + 0.1 = 64450.1
+        assert snapped == 64450.1
+
+    def test_orderbook_snapping_short(self, tmp_engine):
+        """Test SHORT limit order snaps to 1 tick in front of the largest ask wall."""
+        mock_exchange = MagicMock()
+        mock_exchange.fetch_order_book.return_value = {
+            "bids": [
+                [64300.0, 1.0]
+            ],
+            "asks": [
+                [64500.0, 2.0],
+                [64550.0, 38.5],  # <-- Largest sell wall in entry zone
+                [64600.0, 4.1],
+            ]
+        }
+        mock_exchange.market.return_value = {"precision": {"price": 1}}
+
+        snapped = tmp_engine._snap_entry_to_orderbook_wall(
+            mock_exchange, "BTC/USDT:USDT", "short", 64520.0, 64500.0, 64600.0
+        )
+        # Snapped price should be 64550.0 - 0.1 = 64549.9
+        assert snapped == 64549.9
+
+    def test_falling_knife_detection_long(self, tmp_engine):
+        """Test 3 consecutive steep dump bars trigger falling knife detection."""
+        import pandas as pd
+        mock_df = pd.DataFrame({
+            "open": [100.0, 99.5, 99.0, 98.5, 98.0],
+            "close": [99.5, 99.0, 98.5, 98.0, 97.0],  # Dump from 99.0 to 97.0 (>2% drop)
+            "high": [100.1, 99.6, 99.1, 98.6, 98.1],
+            "low": [99.4, 98.9, 98.4, 97.9, 96.9],
+            "volume": [100, 100, 100, 100, 100]
+        })
+        with patch('data_fetcher.DataFetcher.fetch_ohlcv', return_value=mock_df):
+            is_knife = tmp_engine._detect_falling_knife_momentum("SOL/USDT", "long")
+            assert is_knife is True
+
+
+class TestGridEngine:
+    def test_build_grid_math(self):
+        """Test arithmetic grid generation."""
+        from grid_engine import build_grid, is_reduce_only, seed_orders, replacement_for
+        grid = build_grid(60000.0, 70000.0, 10)
+        assert grid["count"] == 10
+        assert grid["spacing"] == 1000.0
+        assert len(grid["levels"]) == 11
+        assert grid["levels"][0] == 60000.0
+        assert grid["levels"][-1] == 70000.0
+
+        assert is_reduce_only("sell", "long") is True
+        assert is_reduce_only("buy", "long") is False
+        assert is_reduce_only("sell", "neutral") is False
+
+        # Test seeding orders
+        seeds = seed_orders(grid["levels"], 65000.0, "neutral", grid["spacing"])
+        assert len(seeds) > 0
+        buys = [s for s in seeds if s["side"] == "buy"]
+        sells = [s for s in seeds if s["side"] == "sell"]
+        assert all(b["price"] < 65000.0 for b in buys)
+        assert all(s["price"] > 65000.0 for s in sells)
+
+        # Test replacement order
+        repl = replacement_for({"level_index": 3, "side": "buy"}, grid["levels"], "neutral")
+        assert repl["level_index"] == 4
+        assert repl["side"] == "sell"
+
+    def test_grid_engine_lifecycle(self, tmp_path):
+        """Test GridEngine start, price tick fill, and profit accumulation."""
+        from grid_engine import GridEngine
+        state_file = str(tmp_path / "test_grid.json")
+        engine = GridEngine(state_file=state_file)
+
+        cfg = {
+            "symbol": "BTC/USDT",
+            "lower": 60000.0,
+            "upper": 70000.0,
+            "grid_count": 10,
+            "size_base": 0.01,
+            "leverage": 10,
+            "mode": "neutral"
+        }
+        res = engine.start_grid(cfg, 65000.0)
+        assert engine.running is True
+        assert engine.stats["completed_rungs"] == 0
+
+        # Simulate price dropping to 64000 (filling buy at 64000)
+        engine.on_price_tick("BTC/USDT", 63900.0, high=65000.0, low=63900.0)
+        assert engine.stats["buys"] >= 1
+        assert engine.stats["volume_usd"] > 0
+
+        # Simulate price rising to 66000 (filling sell at 66000)
+        engine.on_price_tick("BTC/USDT", 66100.0, high=66100.0, low=63900.0)
+        assert engine.stats["sells"] >= 1
+        assert engine.stats["completed_rungs"] >= 1
+        assert engine.stats["grid_profit_usd"] > 0
+
+        # Test stop grid
+        stop_res = engine.stop_grid()
+        assert engine.running is False
+        assert len(engine.active_orders) == 0
+
+    def test_sniper_convert_to_recovery_ladder(self, tmp_engine):
+        """Test converting a floating trade to a Reduce-Only Recovery Ladder."""
+        trade = {
+            "id": "trade-recovery-test",
+            "symbol": "BTC/USDT",
+            "signal_type": "long",
+            "status": "filled",
+            "actual_entry": 65000.0,
+            "planned_entry": 65000.0,
+            "amount": 0.01,
+            "leverage": 20,
+            "margin_usd": 32.5,
+            "stop_loss": 64000.0,
+            "take_profit_targets": [66000.0]
+        }
+        tmp_engine.state["trades"] = [trade]
+
+        res = tmp_engine.convert_to_recovery_ladder("trade-recovery-test")
+        assert res["status"] == "success"
+        assert trade["is_recovery_mode"] is True
+        assert len(trade["recovery_ladder"]) == 3
+        assert trade["recovery_ladder"][0]["price"] > 65000.0  # Above entry to cover fees
+
+
+class TestAutoShiftDynamicGrid:
+    """Test AI Auto-Shift & Dynamic Range Reconstruction on Breakout."""
+
+    def test_auto_shift_upward_breakout(self):
+        from grid_engine import GridEngine, build_grid
+        engine = GridEngine(state_file="/tmp/test_grid_shift_1.json")
+        engine.running = True
+        engine.config = {
+            "symbol": "BNB/USDT",
+            "lower": 590.0,
+            "upper": 610.0,
+            "grid_count": 10,
+            "size_base": 0.01,
+            "leverage": 15,
+            "mode": "neutral",
+            "out_of_range_action": "auto_shift",
+            "is_live": False
+        }
+        engine.grid = build_grid(590.0, 610.0, 10, "BNB/USDT")
+        engine.last_price = 600.0
+
+        # Simulate upward breakout to $635
+        engine.on_price_tick("BNB/USDT", 635.0)
+
+        assert engine.config["mode"] == "long", "Should auto-switch to long mode on upward surge"
+        assert engine.config["lower"] > 600.0, "Lower bound should be shifted upwards"
+        assert engine.config["upper"] > 635.0, "Upper bound should be shifted upwards"
+        assert len(engine.events) > 0, "Should record shift event log"
+        assert "向上突破" in engine.events[0]
+        assert len(engine.active_orders) > 0, "Should re-seed new orders"
+
+    def test_auto_shift_downward_breakout(self):
+        from grid_engine import GridEngine, build_grid
+        engine = GridEngine(state_file="/tmp/test_grid_shift_2.json")
+        engine.running = True
+        engine.config = {
+            "symbol": "BTC/USDT",
+            "lower": 65000.0,
+            "upper": 68000.0,
+            "grid_count": 10,
+            "size_base": 0.001,
+            "leverage": 20,
+            "mode": "neutral",
+            "out_of_range_action": "auto_shift",
+            "is_live": False
+        }
+        engine.grid = build_grid(65000.0, 68000.0, 10, "BTC/USDT")
+        engine.last_price = 66000.0
+
+        # Simulate downward dump to $63000
+        engine.on_price_tick("BTC/USDT", 63000.0)
+
+        assert engine.config["mode"] == "short", "Should auto-switch to short mode on downward dump"
+        assert engine.config["lower"] < 63000.0, "Lower bound should be shifted downwards"
+        assert engine.config["upper"] < 66000.0, "Upper bound should be shifted downwards"
+        assert "向下破位" in engine.events[0]
+        assert "向下破位" in engine.events[0]
+
+
+class TestPyramidSizingAndScreener:
+    """Test Pyramid Sizing Model and Grid Screener metrics."""
+
+    def test_compute_level_size_pyramid_long(self):
+        from grid_engine import compute_level_size
+        levels = [600.0, 610.0, 620.0, 630.0, 640.0, 650.0]
+        # Price is at 645 (closest to level index 4/5)
+        # Deepest level (0) should have the highest multiplier (~1.5x)
+        size_deep, mult_deep = compute_level_size(0, len(levels), 645.0, levels, 0.01, mode="long", sizing_mode="pyramid")
+        assert mult_deep >= 1.4
+        assert size_deep > 0.01
+
+        # Level close to market (index 3) should have lower multiplier (~0.8x-1.0x)
+        size_near, mult_near = compute_level_size(3, len(levels), 645.0, levels, 0.01, mode="long", sizing_mode="pyramid")
+        assert mult_near <= 1.1
+        assert mult_deep > mult_near
+
+    def test_compute_level_size_uniform(self):
+        from grid_engine import compute_level_size
+        levels = [600.0, 610.0, 620.0, 630.0, 640.0, 650.0]
+        size, mult = compute_level_size(0, len(levels), 645.0, levels, 0.01, mode="long", sizing_mode="uniform")
+        assert mult == 1.0
+        assert size == 0.01
+
+    def test_seed_orders_with_pyramid_sizing(self):
+        from grid_engine import build_grid, seed_orders
+        grid = build_grid(600.0, 650.0, 5, "BNB/USDT")
+        seeds = seed_orders(grid["levels"], 645.0, mode="long", spacing=grid["spacing"], base_size=0.01, sizing_mode="pyramid")
+        assert len(seeds) > 0
+        # Check that size_multiplier is present and orders at the bottom have higher sizes
+        sizes = [s["size_base"] for s in seeds]
+        assert sizes[0] >= sizes[-1]  # Lowest price has highest size
+
+
+
+class TestInitialPositionAndAIRealign:
+    """Test Initial Position Auto-Entry and AI Trend Dynamic Realignment."""
+
+    def test_grid_engine_initial_position_long(self, tmp_path):
+        from grid_engine import GridEngine
+        state_file = str(tmp_path / "test_init_pos_long.json")
+        engine = GridEngine(state_file=state_file)
+
+        cfg = {
+            "symbol": "BTC/USDT",
+            "lower": 60000.0,
+            "upper": 70000.0,
+            "grid_count": 10,
+            "size_base": 0.01,
+            "leverage": 10,
+            "mode": "long",
+            "auto_open_initial_position": True
+        }
+        res = engine.start_grid(cfg, 65000.0)
+        assert engine.running is True
+        assert engine.config["has_initial_position"] is True
+        
+        # Verify both BUY orders (below 65000) and SELL orders (above 65000) exist on startup
+        orders = list(engine.active_orders.values())
+        buys = [o for o in orders if o["side"] == "buy"]
+        sells = [o for o in orders if o["side"] == "sell"]
+        assert len(buys) > 0, "Should have lower dip-buy orders"
+        assert len(sells) > 0, "Should have upper take-profit sell orders"
+
+        # When price moves UP immediately to 66100, upper sell order fills and locks profit directly!
+        engine.on_price_tick("BTC/USDT", 66100.0, high=66100.0, low=65000.0)
+        assert engine.stats["sells"] >= 1
+        assert engine.stats["completed_rungs"] >= 1
+        assert engine.stats["grid_profit_usd"] > 0, "Should earn profit immediately on upward tick without waiting for dips"
+
+    def test_grid_engine_initial_position_short(self, tmp_path):
+        from grid_engine import GridEngine
+        state_file = str(tmp_path / "test_init_pos_short.json")
+        engine = GridEngine(state_file=state_file)
+
+        cfg = {
+            "symbol": "BTC/USDT",
+            "lower": 60000.0,
+            "upper": 70000.0,
+            "grid_count": 10,
+            "size_base": 0.01,
+            "leverage": 10,
+            "mode": "short",
+            "auto_open_initial_position": True
+        }
+        res = engine.start_grid(cfg, 65000.0)
+        assert engine.running is True
+        assert engine.config["has_initial_position"] is True
+        
+        # Verify both BUY orders (below 65000) and SELL orders (above 65000) exist
+        orders = list(engine.active_orders.values())
+        buys = [o for o in orders if o["side"] == "buy"]
+        sells = [o for o in orders if o["side"] == "sell"]
+        assert len(buys) > 0
+        assert len(sells) > 0
+
+        # When price moves DOWN immediately to 63900, lower buy order fills and locks profit directly!
+        engine.on_price_tick("BTC/USDT", 63900.0, high=65000.0, low=63900.0)
+        assert engine.stats["buys"] >= 1
+        assert engine.stats["completed_rungs"] >= 1
+        assert engine.stats["grid_profit_usd"] > 0, "Should earn profit immediately on downward tick in short mode"
+
+    def test_realign_grid_with_ai(self, tmp_path):
+        from grid_engine import GridEngine
+        state_file = str(tmp_path / "test_realign_ai.json")
+        engine = GridEngine(state_file=state_file)
+
+        cfg = {
+            "symbol": "ETH/USDT",
+            "lower": 2200.0,
+            "upper": 2600.0,
+            "grid_count": 10,
+            "size_base": 0.1,
+            "leverage": 10,
+            "mode": "long"
+        }
+        engine.start_grid(cfg, 2400.0)
+        assert engine.config["mode"] == "long"
+
+        # AI detects trend flip to short
+        engine.realign_grid_with_ai(
+            symbol="ETH/USDT",
+            new_mode="short",
+            new_lower=2100.0,
+            new_upper=2500.0,
+            current_price=2350.0,
+            reason="4H空头形态确立"
+        )
+
+        assert engine.config["mode"] == "short"
+        assert engine.config["lower"] == 2100.0
+        assert engine.config["upper"] == 2500.0
+        assert len(engine.events) > 0
+        assert "4H空头形态确立" in engine.events[0] or "SHORT" in engine.events[0]
+        assert len(engine.active_orders) > 0
+
+
 # ═══════════════════════════════════════════════════════════════
 # Run tests
 # ═══════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])
+

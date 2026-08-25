@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { AreaChart, Settings, Play, ShieldAlert, CheckCircle2, TrendingUp, HelpCircle, Target, History, Brain } from 'lucide-react';
+import { AreaChart, Settings, Play, ShieldAlert, CheckCircle2, TrendingUp, HelpCircle, Target, History, Brain, Layers } from 'lucide-react';
 import KLineChart from './components/KLineChart';
 import SettingsPanel from './components/SettingsPanel';
 import SniperDashboard from './components/SniperDashboard';
+import GridPanel from './components/GridPanel';
 import BacktestPanel from './components/BacktestPanel';
 import PromptEditorPanel from './components/PromptEditorPanel';
 import SentimentPanel from './components/SentimentPanel';
@@ -523,6 +524,13 @@ export default function App() {
             <span>🎯 智能狙击控制台</span>
           </button>
           <button
+            className={`btn btn-secondary ${activeTab === 'grid' ? 'active' : ''}`}
+            onClick={() => setActiveTab('grid')}
+          >
+            <Layers size={16} style={{ color: '#34c759' }} />
+            <span>🌐 等差网格做市</span>
+          </button>
+          <button
             className={`btn btn-secondary ${activeTab === 'backtest' ? 'active' : ''}`}
             onClick={() => setActiveTab('backtest')}
           >
@@ -559,6 +567,10 @@ export default function App() {
         ) : activeTab === 'sniper' ? (
           <div style={{ padding: '0.75rem 1rem 1rem', height: '100%', overflowY: 'auto' }}>
             <SniperDashboard apiBase={API_BASE} />
+          </div>
+        ) : activeTab === 'grid' ? (
+          <div style={{ padding: '0.75rem 1rem 1rem', height: '100%', overflowY: 'auto' }}>
+            <GridPanel apiBase={API_BASE} />
           </div>
         ) : activeTab === 'backtest' ? (
           <div style={{ padding: '0.75rem 1rem 1rem', height: '100%', overflowY: 'auto' }}>

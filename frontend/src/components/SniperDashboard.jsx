@@ -275,6 +275,25 @@ export default function SniperDashboard({ apiBase }) {
     }
   };
 
+  const handleConvertToRecovery = async (tradeId, symbol) => {
+    if (!window.confirm(`确定要为 ${symbol} 启动「只减仓智能解套回收阶梯」吗？\n将在开仓保本价（含手续费）及上方/下方反弹阻力位自动挂出 3 档平仓单，等回踩时安全平滑解套。`)) return;
+    try {
+      const res = await fetch(`/api/trades/${tradeId}/recover`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
+      });
+      const data = await res.json();
+      if (data.status === 'success') {
+        alert(`已成功为 ${symbol} 启用只减仓回收阶梯！`);
+        fetchData();
+      } else {
+        alert(`操作失败：${data.message}`);
+      }
+    } catch (err) {
+      alert(`网络请求失败: ${err.message}`);
+    }
+  };
+
   const handleResetPaper = async () => {
     const inputVal = window.prompt("请输入重新开局的模拟初始资金金额 (USD)：", "10000");
     if (inputVal === null) return;
@@ -835,7 +854,24 @@ export default function SniperDashboard({ apiBase }) {
                             )}
                           </td>
 
-                          <td style={{ textAlign: 'right' }}>
+                          <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
+                            <button
+                              onClick={() => handleConvertToRecovery(t.id, t.symbol)}
+                              style={{
+                                background: 'rgba(0, 122, 255, 0.08)',
+                                color: '#0071e3',
+                                border: '1px solid rgba(0, 122, 255, 0.2)',
+                                borderRadius: '6px',
+                                padding: '3px 8px',
+                                fontSize: '0.75rem',
+                                cursor: 'pointer',
+                                fontWeight: '600',
+                                marginRight: '6px'
+                              }}
+                              title="在反弹路径上铺设3档只减仓阶梯单，平滑解套离场"
+                            >
+                              🛡️ 回收阶梯
+                            </button>
                             <button
                               onClick={() => handleCloseTrade(t.id, t.symbol)}
                               style={{

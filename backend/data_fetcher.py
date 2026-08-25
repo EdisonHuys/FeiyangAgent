@@ -88,23 +88,44 @@ class DataFetcher:
     def fetch_ohlcv(self, symbol, timeframe, limit=200):
         normalized_tf = '1M' if timeframe.upper() == '1M' else timeframe.lower()
         
+        is_thousand_contract = symbol.upper().startswith("1000")
+        base_spot_symbol = symbol.replace("1000", "", 1) if is_thousand_contract else symbol
+        
         last_error = None
         for ex_id, exchange in self.exchanges.items():
-            try:
-                ohlcv = exchange.fetch_ohlcv(symbol, timeframe=normalized_tf, limit=limit)
-                if not ohlcv:
-                    raise ValueError(f"No OHLCV data returned from {ex_id} for {symbol} - {normalized_tf}")
+            candidate_symbols = [symbol]
+            if is_thousand_contract:
+                candidate_symbols.append(base_spot_symbol)
+            elif not symbol.upper().startswith("1000"):
+                candidate_symbols.append(f"1000{symbol}")
                 
-                df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
-                
-                for col in ['open', 'high', 'low', 'close', 'volume']:
-                    df[col] = df[col].astype(float)
-                
-                return df
-            except Exception as e:
-                last_error = e
-                continue
+            for cand_sym in candidate_symbols:
+                try:
+                    ohlcv = exchange.fetch_ohlcv(cand_sym, timeframe=normalized_tf, limit=limit)
+                    if not ohlcv:
+                        continue
+                    
+                    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                    df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
+                    
+                    for col in ['open', 'high', 'low', 'close', 'volume']:
+                        df[col] = df[col].astype(float)
+                        
+                    # If requested 1000PEPE but fetched PEPE from spot: multiply price by 1000
+                    if is_thousand_contract and cand_sym == base_spot_symbol:
+                        for p_col in ['open', 'high', 'low', 'close']:
+                            df[p_col] = df[p_col] * 1000.0
+                        df['volume'] = df['volume'] / 1000.0
+                    # If requested PEPE but fetched 1000PEPE: divide price by 1000
+                    elif (not is_thousand_contract) and cand_sym.startswith("1000"):
+                        for p_col in ['open', 'high', 'low', 'close']:
+                            df[p_col] = df[p_col] / 1000.0
+                        df['volume'] = df['volume'] * 1000.0
+                    
+                    return df
+                except Exception as e:
+                    last_error = e
+                    continue
                 
         logger.error(f"All exchanges failed to fetch data for {symbol} - {timeframe}.")
         raise ValueError(f"无法从任何交易所 (Binance/OKX/Bybit/Gate) 获取 {symbol} 的 K 线数据: {last_error}")
@@ -128,38 +149,44 @@ class DataFetcher:
 
     def fetch_latest_prices(self, symbols):
         """
-        Fetch the latest prices for a list of symbols in as few requests as
-        possible. Tries a single batched fetch_tickers() call per exchange
-        first; falls back to lightweight per-symbol 1h klines on failure.
-
-        Returns a dict: {symbol: price_float}
+        Fetch the latest prices for a list of symbols in as few requests as possible.
         """
         prices = {}
 
         # Fast path: one batched tickers request per exchange
         for ex_id, exchange in self.exchanges.items():
             try:
-                tickers = exchange.fetch_tickers(symbols)
+                tickers = exchange.fetch_tickers()
                 for sym in symbols:
+                    if sym in prices:
+                        continue
                     ticker = tickers.get(sym)
-                    if ticker:
+                    if not ticker and sym.startswith("1000"):
+                        base_sym = sym.replace("1000", "", 1)
+                        ticker_base = tickers.get(base_sym)
+                        if ticker_base:
+                            last = ticker_base.get('last') or ticker_base.get('close')
+                            if last:
+                                prices[sym] = float(last) * 1000.0
+                    elif ticker:
                         last = ticker.get('last') or ticker.get('close')
                         if last:
                             prices[sym] = float(last)
-                if prices:
+                if len(prices) == len(symbols):
                     return prices
             except Exception as e:
                 logger.debug(f"fetch_tickers failed on {ex_id}: {e}")
                 continue
 
-        # Slow path: per-symbol klines (with cross-exchange fallback inside fetch_ohlcv)
+        # Slow path
         for sym in symbols:
-            try:
-                df = self.fetch_ohlcv(sym, timeframe='1h', limit=2)
-                if df is not None and not df.empty:
-                    prices[sym] = float(df['close'].iloc[-1])
-            except Exception as e:
-                logger.debug(f"Fallback kline price fetch failed for {sym}: {e}")
+            if sym not in prices:
+                try:
+                    df = self.fetch_ohlcv(sym, timeframe='1h', limit=2)
+                    if df is not None and not df.empty:
+                        prices[sym] = float(df['close'].iloc[-1])
+                except Exception as e:
+                    logger.debug(f"Fallback kline price fetch failed for {sym}: {e}")
         return prices
 
 
