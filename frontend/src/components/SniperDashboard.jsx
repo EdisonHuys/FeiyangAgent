@@ -7,6 +7,7 @@ export default function SniperDashboard({ apiBase }) {
   const [dashboardData, setDashboardData] = useState(null);
   const [trades, setTrades] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [savingConfig, setSavingConfig] = useState(false);
   const [showConfigModal, setShowConfigModal] = useState(false);
   const [activeSubTab, setActiveSubTab] = useState('general'); // 'general' or 'exchange'
@@ -49,18 +50,25 @@ export default function SniperDashboard({ apiBase }) {
 
   const isFetchingRef = useRef(false);
 
-  const fetchData = async (isInitial = false) => {
-    if (isFetchingRef.current) return;
+  const fetchData = async (isInitial = false, forceRefresh = false) => {
+    if (isFetchingRef.current && !forceRefresh) return;
     isFetchingRef.current = true;
 
+    const startTs = Date.now();
     if (isInitial && !dashboardData) {
       setLoading(true);
     }
+    if (forceRefresh) {
+      setRefreshing(true);
+    }
     try {
       const currentMode = localStorage.getItem('sniper_mode') || formConfig.mode || 'paper';
+      const forceParam = forceRefresh ? 'force_refresh=true' : '';
+      const dashUrl = `${apiBase}/api/sniper/dashboard${forceParam ? `?${forceParam}` : ''}`;
+      const tradesUrl = `${apiBase}/api/sniper/trades?mode=${currentMode}${forceParam ? `&${forceParam}` : ''}`;
       const [dashRes, tradesRes] = await Promise.all([
-        fetch(`${apiBase}/api/sniper/dashboard`),
-        fetch(`${apiBase}/api/sniper/trades?mode=${currentMode}`)
+        fetch(dashUrl),
+        fetch(tradesUrl)
       ]);
       const dashJson = await dashRes.json();
       const tradesJson = await tradesRes.json();
@@ -82,6 +90,11 @@ export default function SniperDashboard({ apiBase }) {
     } finally {
       setLoading(false);
       isFetchingRef.current = false;
+      if (forceRefresh) {
+        const elapsed = Date.now() - startTs;
+        const remain = Math.max(0, 450 - elapsed);
+        setTimeout(() => setRefreshing(false), remain);
+      }
     }
   };
 
@@ -319,16 +332,12 @@ export default function SniperDashboard({ apiBase }) {
   };
 
   const handleResetLive = async () => {
-    const inputVal = window.prompt("请输入实盘账户初始基准资金 (USD)：", "10000");
-    if (inputVal === null) return;
-    const initialBal = parseFloat(inputVal) || 10000.0;
-
-    if (!window.confirm(`确认要清空所有实盘交易记录与统计数据，并将 live 账户基准重置为 $${initialBal} USD 吗？此操作不可撤销！`)) return;
+    if (!window.confirm('确认要清空所有实盘历史交易记录与统计数据，并重新从交易所同步真实账户余额吗？此操作不可撤销！')) return;
     try {
       const res = await fetch(`${apiBase}/api/sniper/reset-live`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ initial_balance: initialBal })
+        body: JSON.stringify({ initial_balance: 0 })
       });
       const data = await res.json();
       if (data.status === 'success') {
@@ -479,12 +488,13 @@ export default function SniperDashboard({ apiBase }) {
           </button>
 
           <button
-            onClick={fetchData}
+            onClick={() => fetchData(false, true)}
+            disabled={refreshing}
             className="btn btn-secondary"
-            style={{ padding: '0.4rem', display: 'flex', alignItems: 'center' }}
-            title="刷新数据"
+            style={{ padding: '0.4rem', display: 'flex', alignItems: 'center', opacity: refreshing ? 0.75 : 1 }}
+            title="强制刷新交易所实时余额与持仓数据"
           >
-            <RefreshCw size={15} className={loading ? 'spin' : ''} />
+            <RefreshCw size={15} className={(loading || refreshing) ? 'spin' : ''} />
           </button>
         </div>
       </LiquidGlass>

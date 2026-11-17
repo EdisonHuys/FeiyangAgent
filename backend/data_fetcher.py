@@ -3,6 +3,8 @@ import pandas as pd
 import time
 import logging
 import urllib.request
+import urllib.parse
+import json
 import os
 import socket
 import threading
@@ -12,6 +14,8 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 FALLBACK_EXCHANGES = ['binance', 'okx', 'bybit', 'gate']
+BINANCE_VISION_BASE = "https://data-api.binance.vision/api/v3"
+_GEO_BLOCK_TTL_SEC = 300.0  # Cache HTTP 451/403 geo-blocked exchange status for 5 minutes
 
 # Proxy environment variables only need to be applied once per process,
 # not on every DataFetcher instantiation.
@@ -48,12 +52,14 @@ class DataFetcher:
     def __init__(self, exchange_id='binance'):
         self.primary_exchange_id = exchange_id.lower()
         self.exchanges = {}
+        self._exchange_locks = {}
+        self._blocked_exchanges = {}  # {ex_id: blocked_at_ts}
         
         proxy_url = detect_local_vpn_proxy()
         self.proxy_url = proxy_url
         self.proxies = {'http': proxy_url, 'https': proxy_url} if proxy_url else None
 
-        # Apply proxy env vars exactly once per process (global side effect)
+        # Apply proxy env vars once per process, while bypassing proxy for domestic LLM APIs
         global _proxy_env_applied
         if proxy_url and not _proxy_env_applied:
             with _proxy_env_lock:
@@ -62,6 +68,9 @@ class DataFetcher:
                     os.environ['HTTPS_PROXY'] = proxy_url
                     os.environ['http_proxy'] = proxy_url
                     os.environ['https_proxy'] = proxy_url
+                    no_proxy_domains = "localhost,127.0.0.1,.volces.com,.deepseek.com,.aliyuncs.com,.moonshot.cn"
+                    os.environ.setdefault('NO_PROXY', no_proxy_domains)
+                    os.environ.setdefault('no_proxy', no_proxy_domains)
                     _proxy_env_applied = True
 
         exchange_order = [self.primary_exchange_id] + [ex for ex in FALLBACK_EXCHANGES if ex != self.primary_exchange_id]
@@ -71,9 +80,11 @@ class DataFetcher:
                 ex_class = getattr(ccxt, ex_id)
                 config = {
                     'enableRateLimit': True,
-                    'timeout': 5000,
+                    'timeout': 8000,
+                    'has': {'fetchCurrencies': False},
                     'options': {
                         'defaultType': 'spot',
+                        'fetchCurrencies': False,
                     }
                 }
                 if proxy_url:
@@ -82,8 +93,72 @@ class DataFetcher:
                         'https': proxy_url
                     }
                 self.exchanges[ex_id] = ex_class(config)
+                self._exchange_locks[ex_id] = threading.Lock()
             except Exception as e:
                 logger.warning(f"Could not initialize exchange {ex_id}: {e}")
+
+    @property
+    def exchange(self):
+        """Return the primary exchange CCXT instance."""
+        return self.exchanges.get(self.primary_exchange_id)
+
+    def _is_real_ccxt_exchange(self, exchange) -> bool:
+        ex_cls = getattr(ccxt, "Exchange", None)
+        if isinstance(ex_cls, type):
+            return isinstance(exchange, ex_cls)
+        return not type(exchange).__name__.endswith("Mock")
+
+    def _is_geo_or_waf_blocked_error(self, err: Exception) -> bool:
+        msg = str(err)
+        return ("451" in msg or "403 Forbidden" in msg or "restricted location" in msg or "CloudFront" in msg)
+
+    def _fetch_binance_vision_ohlcv(self, symbol: str, normalized_tf: str, limit: int):
+        """
+        Lightweight direct REST fallback to data-api.binance.vision/api/v3/klines.
+        Bypasses api.binance.com HTTP 451 geo-blocks and avoids 25MB /exchangeInfo downloads.
+        """
+        is_thousand_contract = symbol.upper().startswith("1000")
+        base_spot_symbol = symbol.replace("1000", "", 1) if is_thousand_contract else symbol
+        raw_pair = base_spot_symbol.split(":")[0].replace("/", "").upper()
+        url = f"{BINANCE_VISION_BASE}/klines?symbol={urllib.parse.quote(raw_pair)}&interval={urllib.parse.quote(normalized_tf)}&limit={int(limit)}"
+        req = urllib.request.Request(url, headers={"User-Agent": "FeiyangAgent/1.0"})
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        if not data or not isinstance(data, list):
+            return None
+        rows = [[int(r[0]), float(r[1]), float(r[2]), float(r[3]), float(r[4]), float(r[5])] for r in data]
+        df = pd.DataFrame(rows, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
+        if is_thousand_contract:
+            for p_col in ['open', 'high', 'low', 'close']:
+                df[p_col] = df[p_col] * 1000.0
+            df['volume'] = df['volume'] / 1000.0
+        return df
+
+    def _fetch_binance_vision_prices(self, symbols) -> dict:
+        """
+        Lightweight direct REST fallback to data-api.binance.vision/api/v3/ticker/price.
+        """
+        prices = {}
+        req = urllib.request.Request(f"{BINANCE_VISION_BASE}/ticker/price", headers={"User-Agent": "FeiyangAgent/1.0"})
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            items = json.loads(resp.read().decode("utf-8"))
+        if not isinstance(items, list):
+            return prices
+        price_map = {item["symbol"]: float(item["price"]) for item in items if "symbol" in item and "price" in item}
+        for sym in symbols:
+            clean = sym.split(":")[0].replace("/", "").upper()
+            if clean in price_map:
+                prices[sym] = price_map[clean]
+            elif sym.upper().startswith("1000"):
+                base_clean = clean.replace("1000", "", 1)
+                if base_clean in price_map:
+                    prices[sym] = price_map[base_clean] * 1000.0
+            else:
+                th_clean = f"1000{clean}"
+                if th_clean in price_map:
+                    prices[sym] = price_map[th_clean] / 1000.0
+        return prices
 
     def fetch_ohlcv(self, symbol, timeframe, limit=200):
         normalized_tf = '1M' if timeframe.upper() == '1M' else timeframe.lower()
@@ -93,14 +168,34 @@ class DataFetcher:
         
         last_error = None
         for ex_id, exchange in self.exchanges.items():
+            is_real_ex = self._is_real_ccxt_exchange(exchange)
+            if is_real_ex:
+                blocked_at = self._blocked_exchanges.get(ex_id, 0.0)
+                if blocked_at and (time.time() - blocked_at) < _GEO_BLOCK_TTL_SEC:
+                    if ex_id == "binance":
+                        try:
+                            df_vis = self._fetch_binance_vision_ohlcv(symbol, normalized_tf, limit)
+                            if df_vis is not None and not df_vis.empty:
+                                return df_vis
+                        except Exception as ve:
+                            last_error = ve
+                    continue
+
             candidate_symbols = [symbol]
             if is_thousand_contract:
                 candidate_symbols.append(base_spot_symbol)
             elif not symbol.upper().startswith("1000"):
                 candidate_symbols.append(f"1000{symbol}")
                 
-            for cand_sym in candidate_symbols:
+            for idx, cand_sym in enumerate(candidate_symbols):
                 try:
+                    # Serialize initial load_markets() per exchange to avoid thread-pool stampede
+                    if is_real_ex and not getattr(exchange, "markets", None):
+                        lock = self._exchange_locks.setdefault(ex_id, threading.Lock())
+                        with lock:
+                            if not getattr(exchange, "markets", None):
+                                exchange.load_markets()
+
                     ohlcv = exchange.fetch_ohlcv(cand_sym, timeframe=normalized_tf, limit=limit)
                     if not ohlcv:
                         continue
@@ -125,6 +220,28 @@ class DataFetcher:
                     return df
                 except Exception as e:
                     last_error = e
+                    if is_real_ex and self._is_geo_or_waf_blocked_error(e):
+                        self._blocked_exchanges[ex_id] = time.time()
+                        if ex_id == "binance":
+                            try:
+                                df_vis = self._fetch_binance_vision_ohlcv(symbol, normalized_tf, limit)
+                                if df_vis is not None and not df_vis.empty:
+                                    return df_vis
+                            except Exception as ve:
+                                last_error = ve
+                        break
+                    # Only try 1000x alternate symbol if the primary symbol raised BadSymbol
+                    bad_sym_cls = getattr(ccxt, "BadSymbol", None)
+                    is_bad_sym = (isinstance(bad_sym_cls, type) and isinstance(e, bad_sym_cls)) or ("does not have market symbol" in str(e))
+                    if idx == 0 and is_real_ex and not is_bad_sym:
+                        if ex_id == "binance":
+                            try:
+                                df_vis = self._fetch_binance_vision_ohlcv(symbol, normalized_tf, limit)
+                                if df_vis is not None and not df_vis.empty:
+                                    return df_vis
+                            except Exception:
+                                pass
+                        break
                     continue
                 
         logger.error(f"All exchanges failed to fetch data for {symbol} - {timeframe}.")
@@ -134,8 +251,10 @@ class DataFetcher:
         """
         Fetch multiple timeframes concurrently using a thread pool.
         """
+        if not timeframes:
+            return {}
         results = {}
-        with ThreadPoolExecutor(max_workers=len(timeframes)) as executor:
+        with ThreadPoolExecutor(max_workers=max(1, len(timeframes))) as executor:
             future_to_tf = {executor.submit(self.fetch_ohlcv, symbol, tf, limit): tf for tf in timeframes}
             for future in as_completed(future_to_tf):
                 tf = future_to_tf[future]
@@ -155,19 +274,39 @@ class DataFetcher:
 
         # Fast path: one batched tickers request per exchange
         for ex_id, exchange in self.exchanges.items():
+            is_real_ex = self._is_real_ccxt_exchange(exchange)
+            if is_real_ex:
+                blocked_at = self._blocked_exchanges.get(ex_id, 0.0)
+                if blocked_at and (time.time() - blocked_at) < _GEO_BLOCK_TTL_SEC:
+                    if ex_id == "binance":
+                        try:
+                            vis_prices = self._fetch_binance_vision_prices([s for s in symbols if s not in prices])
+                            prices.update(vis_prices)
+                            if len(prices) == len(symbols):
+                                return prices
+                        except Exception:
+                            pass
+                    continue
             try:
                 tickers = exchange.fetch_tickers()
                 for sym in symbols:
                     if sym in prices:
                         continue
-                    ticker = tickers.get(sym)
+                    ticker = tickers.get(sym) or tickers.get(sym.split(":")[0]) or tickers.get(f"{sym}:USDT")
                     if not ticker and sym.startswith("1000"):
                         base_sym = sym.replace("1000", "", 1)
-                        ticker_base = tickers.get(base_sym)
+                        ticker_base = tickers.get(base_sym) or tickers.get(f"{base_sym}:USDT")
                         if ticker_base:
                             last = ticker_base.get('last') or ticker_base.get('close')
                             if last:
                                 prices[sym] = float(last) * 1000.0
+                    elif not ticker and not sym.startswith("1000"):
+                        thousand_sym = f"1000{sym}"
+                        ticker_th = tickers.get(thousand_sym) or tickers.get(f"{thousand_sym}:USDT")
+                        if ticker_th:
+                            last = ticker_th.get('last') or ticker_th.get('close')
+                            if last:
+                                prices[sym] = float(last) / 1000.0
                     elif ticker:
                         last = ticker.get('last') or ticker.get('close')
                         if last:
@@ -175,6 +314,16 @@ class DataFetcher:
                 if len(prices) == len(symbols):
                     return prices
             except Exception as e:
+                if is_real_ex and self._is_geo_or_waf_blocked_error(e):
+                    self._blocked_exchanges[ex_id] = time.time()
+                if is_real_ex and ex_id == "binance":
+                    try:
+                        vis_prices = self._fetch_binance_vision_prices([s for s in symbols if s not in prices])
+                        prices.update(vis_prices)
+                        if len(prices) == len(symbols):
+                            return prices
+                    except Exception:
+                        pass
                 logger.debug(f"fetch_tickers failed on {ex_id}: {e}")
                 continue
 

@@ -20,7 +20,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 try:
     from data_fetcher import DataFetcher, get_data_fetcher
     from indicators import (calculate_indicators, calculate_fibonacci_levels, clean_and_compress,
-                            detect_market_regime, calculate_4h_fibonacci, calculate_support_resistance,
+                            detect_market_regime, detect_multi_timeframe_regime, calculate_4h_fibonacci, calculate_support_resistance,
                             compute_key_levels_context, detect_volume_spike)
     from agent import FeiyangAgent, load_system_prompt
     from notifier import Notifier
@@ -31,7 +31,7 @@ try:
 except ImportError:
     from backend.data_fetcher import DataFetcher, get_data_fetcher
     from backend.indicators import (calculate_indicators, calculate_fibonacci_levels, clean_and_compress,
-                                    detect_market_regime, calculate_4h_fibonacci, calculate_support_resistance,
+                                    detect_market_regime, detect_multi_timeframe_regime, calculate_4h_fibonacci, calculate_support_resistance,
                                     compute_key_levels_context, detect_volume_spike)
     from backend.agent import FeiyangAgent, load_system_prompt
     from backend.notifier import Notifier
@@ -285,7 +285,7 @@ def process_signal_evaluation(symbol: str, payload: dict, json_signal: dict, mar
                     should_push = True
                     push_reason = f"🎯 价格已回踩进入最佳吃单区间 (${lower_entry} - ${upper_entry})"
                 else:
-                    if prev_min and prev_max and lower_entry and upper_entry:
+                    if prev_min and prev_max and prev_min > 0 and prev_max > 0 and lower_entry and upper_entry:
                         shift_min = abs(lower_entry - prev_min) / prev_min
                         shift_max = abs(upper_entry - prev_max) / prev_max
                         if shift_min > 0.01 or shift_max > 0.01:
@@ -300,6 +300,7 @@ def process_signal_evaluation(symbol: str, payload: dict, json_signal: dict, mar
                 log_monitor_event(f"🎯 [狙击系统] [{mode_str}] 成功自动挂单/成交 {symbol} {sig_type.upper()} 计划！（保证金 ${sniper_trade['margin_usd']}，杠杆 {sniper_trade['leverage']}x）")
         except Exception as se:
             logger.warning(f"Sniper engine order placement error: {se}")
+            log_monitor_event(f"⚠️ [狙击系统] {symbol} 挂单未执行：{se}")
 
         if should_push:
             notify_cfg = yaml_cfg.get("notifications", {})
@@ -942,14 +943,14 @@ class SniperConfigRequest(BaseModel):
     slippage_rate: Optional[float] = None
 
 @app.get("/api/sniper/dashboard")
-def get_sniper_dashboard():
-    return sniper_engine.get_dashboard_data()
+def get_sniper_dashboard(force_refresh: bool = False):
+    return sniper_engine.get_dashboard_data(force_refresh=force_refresh)
 
 @app.get("/api/sniper/trades")
-def get_sniper_trades(mode: Optional[str] = None):
+def get_sniper_trades(mode: Optional[str] = None, force_refresh: bool = False):
     return {
         "status": "success",
-        "trades": sniper_engine.get_trades(mode_filter=mode)
+        "trades": sniper_engine.get_trades(mode_filter=mode, force_refresh=force_refresh)
     }
 
 @app.post("/api/sniper/sync-positions-force")
@@ -1055,7 +1056,12 @@ class StartGridRequest(BaseModel):
     sizing_mode: str = "pyramid"
     out_of_range_action: str = "auto_shift"
     is_live: bool = False
-    auto_open_initial_position: bool = True
+    auto_open_initial_position: bool = False
+    auto_resume_after_breaker: bool = False
+    max_drawdown_limit_pct: float = 15.0
+    auto_compound: bool = True
+    target_rung_spacing_pct: Optional[float] = None
+    initial_capital_usd: Optional[float] = None
 
 _grid_screener_cache = {"data": None, "time": 0.0}
 _grid_screener_lock = threading.Lock()
@@ -1091,28 +1097,28 @@ def get_grid_screener(force_refresh: bool = False):
 
     for sym in symbols_to_scan:
         try:
-            df = fetcher.fetch_ohlcv(sym, "4h", limit=35)
+            df = fetcher.fetch_ohlcv(sym, "4h", limit=55)
             if df is None or len(df) < 15:
                 continue
 
             current_p = float(df["close"].iloc[-1])
-            prev_p = float(df["close"].iloc[0])
-            change_24h_pct = round(((current_p - prev_p) / prev_p) * 100.0, 2)
+            prev_p = float(df["close"].iloc[-7]) if len(df) >= 7 else float(df["close"].iloc[0])
+            change_24h_pct = round(((current_p - prev_p) / prev_p) * 100.0, 2) if prev_p > 0 else 0.0
             
             # High-Low ATR Span
             high_low_span = float((df["high"].iloc[-14:] - df["low"].iloc[-14:]).mean())
-            atr_pct = round((high_low_span / current_p) * 100.0, 2)
+            atr_pct = round((high_low_span / current_p) * 100.0, 2) if current_p > 0 else 0.0
             
             # Regime & Strength
             regime, strength = detect_market_regime(df)
             close_series = df["close"]
             ema20 = float(close_series.ewm(span=20).mean().iloc[-1])
-            ema50 = float(close_series.ewm(span=50).mean().iloc[-1]) if len(close_series) >= 50 else ema20
+            ema50 = float(close_series.ewm(span=50).mean().iloc[-1]) if len(close_series) >= 30 else ema20
 
-            if regime == "trending_up" or (current_p > ema20 and ema20 >= ema50):
+            if regime == "trending_up" and current_p > ema20 and ema20 > ema50 * 1.002:
                 rec_mode = "long"
                 regime_label = "多头主升"
-            elif regime == "trending_down" or (current_p < ema20 and ema20 <= ema50):
+            elif regime == "trending_down" and current_p < ema20 and ema20 < ema50 * 0.998:
                 rec_mode = "short"
                 regime_label = "空头下探"
             else:
@@ -1168,8 +1174,42 @@ def start_grid_trading(req: StartGridRequest):
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"实盘启动失败：{e}")
 
+    # Check if there is an active Sniper position or pending ambush order on this same symbol
+    if sniper_engine:
+        from grid_engine import is_matching_symbol
+        open_sniper_trades = [
+            t for t in sniper_engine.state.get("trades", [])
+            if t.get("status") in ("open", "filled", "pending", "tp1_hit")
+            and is_matching_symbol(t.get("symbol", ""), req.symbol)
+            and (req.is_live or bool(t.get("is_live", False)) == bool(req.is_live))
+        ]
+        if open_sniper_trades:
+            raise HTTPException(
+                status_code=400,
+                detail=f"标的【{req.symbol}】当前存在正在运行的狙击持仓或埋伏挂单，为避免保证金冲突与平仓干扰，请先在狙击看板中平掉/撤销该交易后再启动网格！"
+            )
+
+    if grid_engine.running:
+        cfg_sym = (grid_engine.config or {}).get("symbol")
+        if cfg_sym and cfg_sym == req.symbol:
+            # Idempotent return if grid is already running for the exact same symbol
+            return {
+                "status": "success",
+                "message": f"网格已在运行中 ({req.symbol})",
+                "orders": list(grid_engine.active_orders.values()),
+                "total_orders": len(grid_engine.active_orders)
+            }
+        else:
+            raise HTTPException(status_code=400, detail=f"当前正在运行【{cfg_sym}】网格，请先停止后再启动新币种！")
+
     try:
-        res = grid_engine.start_grid(req.dict(), current_price, exchange=live_exchange)
+        start_cfg = req.dict()
+        if not start_cfg.get("target_rung_spacing_pct") and current_price > 0 and req.upper > req.lower and req.grid_count > 0:
+            start_cfg["target_rung_spacing_pct"] = round(
+                max(0.012, (req.upper - req.lower) / (current_price * req.grid_count)),
+                5
+            )
+        res = grid_engine.start_grid(start_cfg, current_price, exchange=live_exchange)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"启动网格失败: {e}")
 
@@ -1192,6 +1232,49 @@ def stop_grid_trading(req: StopGridRequest):
     res = grid_engine.stop_grid(close_position=req.close_position, exchange=live_exchange)
     log_monitor_event(f"🛑 [网格交易已停止] 已撤销网格全部未结挂单。")
     return res
+
+@app.post("/api/grid/emergency-close-position")
+def emergency_close_grid_position():
+    """Emergency close any live positions and cancel all orders for the current grid symbol immediately."""
+    try:
+        live_exchange = None
+        if grid_engine.config and grid_engine.config.get("is_live"):
+            try:
+                live_exchange, _ = sniper_engine._init_live_ccxt()
+            except Exception:
+                pass
+        symbol = grid_engine.config.get("symbol", "NEAR/USDT") if grid_engine.config else "NEAR/USDT"
+        closed_count = 0
+        if live_exchange:
+            closed_count = grid_engine._close_live_position_safe(live_exchange, symbol)
+            grid_engine._force_cancel_all_live_orders(live_exchange, symbol)
+        if grid_engine.config:
+            grid_engine.config["has_initial_position"] = False
+            grid_engine.config["initial_position_size"] = 0.0
+        if grid_engine.drawdown_stats:
+            grid_engine.drawdown_stats["unrealized_pnl_usd"] = 0.0
+        grid_engine._save_state()
+        log_msg = f"🛑 [紧急平仓执行] 成功平掉交易所 {symbol} 全部持仓 ({closed_count} 笔)，并撤销全部挂单。"
+        log_monitor_event(log_msg)
+        grid_engine.events.insert(0, f"[{datetime.now().strftime('%H:%M:%S')}] {log_msg}")
+        return {"success": True, "closed_count": closed_count, "symbol": symbol}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"紧急全平交易所持仓失败: {e}")
+
+@app.post("/api/grid/reset-breaker")
+def reset_grid_circuit_breaker():
+    """Manually reset the grid engine's circuit breaker and clear cooldown."""
+    try:
+        if grid_engine.drawdown_stats:
+            grid_engine.drawdown_stats["circuit_breaker_tripped"] = False
+            grid_engine.drawdown_stats["circuit_breaker_tripped_at"] = 0.0
+        grid_engine._save_state()
+        log_msg = "🔓 [网格熔断手动解除] 用户手动解除了网格冷静保护期，状态已复位。"
+        log_monitor_event(log_msg)
+        grid_engine.events.insert(0, f"[{datetime.now().strftime('%H:%M:%S')}] {log_msg}")
+        return {"status": "success", "message": "网格熔断状态已手动解除，可立即重新配置做市！"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"解除网格熔断失败: {e}")
 
 _grid_exchange_balance_cache = {"data": None, "time": 0.0}
 
@@ -1224,7 +1307,7 @@ def get_grid_exchange_info(force_refresh: bool = False):
     balance_info = None
     try:
         exchange, _ = sniper_engine._init_live_ccxt()
-        bal = exchange.fetch_balance()
+        bal = exchange.fetch_balance({"type": "swap"})
         usdt_info = bal.get("USDT", {})
         free_usdt = float(usdt_info.get("free") or usdt_info.get("total") or 0.0)
         total_usdt = float(usdt_info.get("total") or free_usdt)
@@ -1237,7 +1320,8 @@ def get_grid_exchange_info(force_refresh: bool = False):
     except Exception as e:
         err_str = str(e)
         prev_data = _grid_exchange_balance_cache.get("data") or {}
-        fallback_bal = prev_data.get("free_usdt") or cfg.get("live_account_balance", 8.94)
+        prev_free = prev_data.get("free_usdt")
+        fallback_bal = float(prev_free if prev_free is not None else cfg.get("live_account_balance", 0.0))
         if "418" in err_str or "-1003" in err_str or "Way too many requests" in err_str:
             friendly_err = "⚠️ 交易所访问频次超限 (IP限流保护中，数分钟后自动解封)"
         elif "Invalid API-key" in err_str or "-2015" in err_str:
@@ -1274,10 +1358,13 @@ def recommend_grid_parameters(req: GridRecommendRequest):
     if df is None or len(df) < 20:
         raise HTTPException(status_code=400, detail="获取K线数据失败")
     current_price = float(df["close"].iloc[-1])
+    if current_price <= 0:
+        raise HTTPException(status_code=400, detail="最新价格异常，无法计算网格参数")
     high_low_span = float((df["high"].iloc[-14:] - df["low"].iloc[-14:]).mean())
 
     # Real Binance USDT-M Futures contract limits and dynamic precision
     sym_upper = req.symbol.upper()
+    default_count = 10
     if "BTC" in sym_upper:
         price_prec = 1
         min_notional_needed = 65.0  # 0.001 BTC min amount (~$64U)
@@ -1318,13 +1405,13 @@ def recommend_grid_parameters(req: GridRecommendRequest):
         if "1000" in sym_upper:
             price_prec = 6
             min_notional_needed = 6.0
-            min_qty = 2000.0
+            min_qty = float(math.ceil(max(500.0, 5.5 / max(current_price, 1e-8)) / 100.0) * 100.0)
             amount_prec = 0
             default_count = 10
         else:
             price_prec = 8
             min_notional_needed = 6.0
-            min_qty = 2000000.0
+            min_qty = float(math.ceil(max(500000.0, 5.5 / max(current_price, 1e-10)) / 100000.0) * 100000.0)
             amount_prec = 0
             default_count = 10
     elif "SHIB" in sym_upper or "BONK" in sym_upper or "FLOKI" in sym_upper:
@@ -1333,11 +1420,23 @@ def recommend_grid_parameters(req: GridRecommendRequest):
         amount_prec = 0
         min_qty = 1000.0 if "1000" in sym_upper else 1000000.0
         default_count = 10
-    elif "SUI" in sym_upper or "NEAR" in sym_upper or "AVAX" in sym_upper or "LINK" in sym_upper or "ADA" in sym_upper:
-        price_prec = 4 if current_price < 10 else 2
+    elif "SUI" in sym_upper or "XRP" in sym_upper:
+        price_prec = 4
         min_notional_needed = 6.0
-        amount_prec = 2 if current_price >= 1.0 else 1
+        amount_prec = 1
         min_qty = round(max(0.1, 6.0 / max(current_price, 0.001)), amount_prec)
+        default_count = 10
+    elif "NEAR" in sym_upper or "AVAX" in sym_upper or "ADA" in sym_upper:
+        price_prec = 3 if ("NEAR" in sym_upper or "AVAX" in sym_upper) else 4
+        min_notional_needed = 6.0
+        amount_prec = 0
+        min_qty = float(math.ceil(max(1.0, 6.0 / max(current_price, 0.001))))
+        default_count = 10
+    elif "LINK" in sym_upper:
+        price_prec = 3
+        min_notional_needed = 21.0
+        amount_prec = 2
+        min_qty = round(max(0.01, 21.0 / max(current_price, 0.001)), amount_prec)
         default_count = 10
     else:
         # Dynamic precision determination based on price
@@ -1363,36 +1462,56 @@ def recommend_grid_parameters(req: GridRecommendRequest):
         min_notional_needed = 6.0
         raw_qty = 6.0 / max(current_price, 1e-8)
         min_qty = round(raw_qty, amount_prec) if amount_prec > 0 else math.ceil(raw_qty)
-        default_count = 10
+        default_count = 12
 
     grid_count = default_count
 
-    # 1. Market Regime & Trend Analysis for Mode Auto-Selection
-    regime, strength = detect_market_regime(df)
-    close_series = df["close"]
-    ema20 = float(close_series.ewm(span=20).mean().iloc[-1])
-    ema50 = float(close_series.ewm(span=50).mean().iloc[-1]) if len(close_series) >= 50 else ema20
+    # 1. Market Agile Multi-Timeframe Resonance Analysis (15M + 1H + 4H + 1D)
+    df_1d = fetcher.fetch_ohlcv(req.symbol, "1d", limit=30)
+    df_1h = fetcher.fetch_ohlcv(req.symbol, "1h", limit=30)
+    df_15m = fetcher.fetch_ohlcv(req.symbol, "15m", limit=30)
+    mtf_res = detect_multi_timeframe_regime(df_1d=df_1d, df_4h=df, df_1h=df_1h, df_15m=df_15m, current_price=current_price)
+    
+    recommended_mode = mtf_res["recommended_mode"]
+    regime_desc = mtf_res["regime_title"]
+    resonance_score = mtf_res["resonance_score"]
 
-    # Ensure high_low_span is at least 2.5% of current price to avoid zero width bounds
-    safe_span = max(high_low_span, current_price * 0.025)
+    # ── Wide-Band ATR Multi-Timeframe Channel Optimization (>= 14% ~ 22% span) ──
+    # Avoid microscopic grid trap! Channel must cover normal intraday 4H/1D volatility swings.
+    # Half-span is anchored to at least 7% of current price or 1.5x 4H ATR.
+    atr_4h = float((df["high"].iloc[-14:] - df["low"].iloc[-14:]).mean()) if (df is not None and len(df) >= 14) else current_price * 0.05
+    atr_1h = float((df_1h["high"].iloc[-14:] - df_1h["low"].iloc[-14:]).mean()) if (df_1h is not None and len(df_1h) >= 14) else atr_4h * 0.5
 
-    if regime == "trending_up" or (current_price > ema20 and ema20 >= ema50):
-        recommended_mode = "long"
-        regime_desc = f"📈 4H多头上升走势 (强度 {strength}/100)，AI已自动选定【逢低做多】网格模式"
-        lower_bound = round(max(current_price * 0.5, current_price - 3.2 * safe_span), price_prec)
-        upper_bound = round(current_price + 2.0 * safe_span, price_prec)
-    elif regime == "trending_down" or (current_price < ema20 and ema20 <= ema50):
-        recommended_mode = "short"
-        regime_desc = f"📉 4H空头下跌走势 (强度 {strength}/100)，AI已自动选定【逢高做空】网格模式"
-        lower_bound = round(max(current_price * 0.5, current_price - 2.0 * safe_span), price_prec)
-        upper_bound = round(current_price + 3.2 * safe_span, price_prec)
+    min_half_span = current_price * 0.07  # Minimum ±7% (14% total width)
+    raw_half_span = max(atr_4h * 1.5, min_half_span)
+
+    volatility_note = "🛡️ 采用宽幅自适应ATR通道（全距≥14%~20%），杜绝频繁突破假破位与滑点磨损"
+    if atr_4h > 0 and atr_1h > 0:
+        atr_ratio = (atr_1h * 2.0) / atr_4h
+        if atr_ratio > 1.35:
+            raw_half_span = raw_half_span * 1.2
+            volatility_note = "⚡ 短期波动爆发，通道自动拓宽至 ~18%~24% 深度捕获宽幅震荡套利"
+        elif atr_ratio < 0.70:
+            volatility_note = "🌙 处于窄幅蓄势期，维持基准宽幅通道保护仓位安全"
+
+    effective_span = raw_half_span
+
+    if recommended_mode == "long":
+        lower_bound = round(max(current_price * 0.1, current_price - 1.3 * effective_span), price_prec)
+        upper_bound = round(current_price + 0.7 * effective_span, price_prec)
+    elif recommended_mode == "short":
+        lower_bound = round(max(current_price * 0.1, current_price - 0.7 * effective_span), price_prec)
+        upper_bound = round(current_price + 1.3 * effective_span, price_prec)
     else:
-        recommended_mode = "neutral"
-        regime_desc = f"⚖️ 4H区间震荡走势 (强度 {strength}/100)，AI已自动选定【中性双向】网格模式"
-        lower_bound = round(max(current_price * 0.5, current_price - 2.5 * safe_span), price_prec)
-        upper_bound = round(current_price + 2.5 * safe_span, price_prec)
+        lower_bound = round(max(current_price * 0.1, current_price - 1.0 * effective_span), price_prec)
+        upper_bound = round(current_price + 1.0 * effective_span, price_prec)
 
-    spacing = round((upper_bound - lower_bound) / grid_count, price_prec)
+    if upper_bound <= lower_bound:
+        min_step = 10 ** (-price_prec) if price_prec > 0 else 1.0
+        upper_bound = round(lower_bound + max(min_step * grid_count, current_price * 0.05), price_prec)
+
+    min_spacing_step = 10 ** (-price_prec) if price_prec > 0 else 0.0001
+    spacing = round(max(min_spacing_step, (upper_bound - lower_bound) / grid_count), price_prec)
 
     # 2. Determine available balance
     avail_bal = req.available_balance
@@ -1403,33 +1522,75 @@ def recommend_grid_parameters(req: GridRecommendRequest):
         avail_bal = 10.0
 
     # 3. Auto-derive optimal size_base:
-    raw_size_for_notional = min_notional_needed / current_price
+    # Ensure that even in pyramid sizing (where closest rungs scale down to 0.8x),
+    # the rung size * current_price remains >= min_notional_needed (Binance min notional is 5.0 USDT)!
+    effective_min_notional = min_notional_needed * 1.25
+    raw_size_for_notional = effective_min_notional / max(current_price, 1e-8)
     if amount_prec > 0:
         recommended_size = round(max(min_qty, raw_size_for_notional), amount_prec)
-        if recommended_size * current_price < min_notional_needed:
+        if (recommended_size * 0.8) * current_price < min_notional_needed:
             recommended_size = round(recommended_size + (10 ** -amount_prec), amount_prec)
     else:
         recommended_size = float(math.ceil(max(min_qty, raw_size_for_notional)))
 
     # Total notional of all rungs
-    total_notional = grid_count * recommended_size * current_price
+    single_rung_notional = recommended_size * current_price
+    target_margin = max(1.0, avail_bal * (0.48 if avail_bal < 20.0 else 0.45))
 
-    # Target leverage to fit within balance
-    target_margin = avail_bal * 0.55
-    if target_margin < 1.0:
-        target_margin = 1.0
+    # Dynamic Capital & Leverage Adaptation (Micro-capital protection):
+    # Cap safe leverage to ensure a solid liquidation buffer (>= 6% ~ 9% buffer):
+    # - Micro balances (< $20): max leverage 12x (gives ~7.3% liquidation clearance)
+    # - Medium balances (< $50): max leverage 15x (gives ~5.6% clearance)
+    # - Larger accounts: up to 20x
+    max_safe_leverage = 12 if avail_bal < 20.0 else (15 if avail_bal < 50.0 else 20)
+
+    # If the default grid_count would push required leverage above max_safe_leverage,
+    # dynamically adapt grid_count down so leverage stays safely within bounds (minimum 4 rungs, max 6 on micro accounts).
+    if single_rung_notional > 0:
+        max_rungs_possible = int((target_margin * max_safe_leverage) / single_rung_notional)
+        if avail_bal < 15.0:
+            max_rungs_possible = min(6, max_rungs_possible)
+        if max_rungs_possible < grid_count:
+            grid_count = max(4, max_rungs_possible)
+            # Recompute spacing with adapted grid_count while preserving the wide ATR-based bounds
+            spacing = round(max(min_spacing_step, (upper_bound - lower_bound) / grid_count), price_prec)
+
+    total_notional = grid_count * recommended_size * current_price
 
     raw_leverage = math.ceil(total_notional / target_margin)
     if raw_leverage <= 10:
         recommended_leverage = 10
+    elif raw_leverage <= 12:
+        recommended_leverage = 12
     elif raw_leverage <= 15:
         recommended_leverage = 15
     elif raw_leverage <= 20:
-        recommended_leverage = 20
+        recommended_leverage = min(max_safe_leverage, 20)
     else:
-        recommended_leverage = min(25, raw_leverage)
+        recommended_leverage = min(max_safe_leverage, raw_leverage)
 
     actual_margin = round(total_notional / recommended_leverage, 2)
+    margin_warning = None
+    if actual_margin > avail_bal:
+        margin_warning = f"⚠️ 保证金预警：当前可用资金 (${round(avail_bal, 2)} USD) 低于此币种合约做市预估所需保证金 (${actual_margin} USD)！建议选择单笔门槛更低的热门币种（如 1000PEPE, DOGE, SUI, NEAR），或点击顶部【🤖 AI 资金全自动选币做市】。"
+
+    # 4. Live 8H Funding Rate Check
+    fr_info = {"rate_8h_pct": 0.01, "est_apr_pct": 10.95, "favorable": True, "desc": "+0.0100% / 8H"}
+    try:
+        if fetcher and hasattr(fetcher, "exchange") and fetcher.exchange and hasattr(fetcher.exchange, "fetch_funding_rate"):
+            ccxt_sym = get_exchange_market_symbol(fetcher.exchange, req.symbol)
+            live_fr = fetcher.exchange.fetch_funding_rate(ccxt_sym)
+            if live_fr and "fundingRate" in live_fr and live_fr["fundingRate"] is not None:
+                r_8h = float(live_fr["fundingRate"]) * 100.0
+                fav = (recommended_mode == "long" and r_8h <= 0.02) or (recommended_mode == "short" and r_8h >= -0.02) or recommended_mode == "neutral"
+                fr_info = {
+                    "rate_8h_pct": round_to(r_8h, 4),
+                    "est_apr_pct": round2(r_8h * 3.0 * 365.0),
+                    "favorable": fav,
+                    "desc": f"{'+' if r_8h >= 0 else ''}{round_to(r_8h, 4)}% / 8H"
+                }
+    except Exception:
+        pass
 
     return {
         "symbol": req.symbol,
@@ -1441,14 +1602,171 @@ def recommend_grid_parameters(req: GridRecommendRequest):
         "recommended_size_base": recommended_size,
         "recommended_leverage": recommended_leverage,
         "estimated_margin_usd": actual_margin,
+        "margin_warning": margin_warning,
         "total_notional_usd": round(total_notional, 2),
         "available_balance_used": avail_bal,
         "min_notional_required": min_notional_needed,
         "atr_14": round(high_low_span, 2),
         "mode": recommended_mode,
-        "regime": regime,
+        "regime": mtf_res.get("resonance_level", "ranging"),
         "regime_desc": regime_desc,
+        "mtf_info": mtf_res,
+        "volatility_regime_note": volatility_note,
+        "funding_rate_info": fr_info,
         "recommended_action": "auto_shift"
+    }
+
+class GridAutoPickRequest(BaseModel):
+    available_balance: Optional[float] = None
+    is_live: bool = False
+    preferred_mode: Optional[str] = None
+
+@app.post("/api/grid/auto-pick")
+def auto_pick_best_grid_coin(req: GridAutoPickRequest):
+    """
+    AI Autonomous Capital-Adaptive Grid Selector:
+    1. Reads actual available USDT capital (live exchange or paper).
+    2. Filters screener coins by capital threshold:
+       - High-threshold coins (BTC/ETH) are safely filtered if capital is small (<$25) to avoid excessive leverage.
+       - Micro-friendly, high-alpha volatility gems (e.g. DOGE, 1000PEPE, SUI, NEAR, XRP) are prioritized.
+    3. Evaluates candidates using combined Alpha Score + Capital Fit + Mean-Reversion safety.
+    4. Selects the #1 optimal coin and computes institutional-grade grid parameters ready to launch!
+    """
+    # 1. Determine available balance
+    avail_bal = req.available_balance
+    if avail_bal is None or avail_bal <= 0:
+        if req.is_live:
+            try:
+                exchange, _ = sniper_engine._init_live_ccxt()
+                bal = exchange.fetch_balance()
+                usdt_info = bal.get("USDT", {})
+                avail_bal = float((usdt_info.get("total") if grid_engine.running else usdt_info.get("free")) or usdt_info.get("total") or 0.0)
+            except Exception:
+                pass
+        if avail_bal is None or avail_bal <= 0:
+            cfg = sniper_engine.state.get("config", {})
+            avail_bal = float(cfg.get("live_account_balance", 8.91))
+        if avail_bal <= 0:
+            avail_bal = 10.0
+
+    # 2. Get screener candidates
+    screener_res = get_grid_screener(force_refresh=False)
+    candidates = list(screener_res.get("screener", []))
+    if not candidates:
+        candidates = [
+            {"symbol": "1000PEPE/USDT", "alpha_score": 96, "atr_pct": 3.8, "recommended_mode": "neutral", "est_daily_yield": "1.8% ~ 3.5%"},
+            {"symbol": "DOGE/USDT", "alpha_score": 92, "atr_pct": 3.2, "recommended_mode": "neutral", "est_daily_yield": "1.5% ~ 3.0%"},
+            {"symbol": "XRP/USDT", "alpha_score": 88, "atr_pct": 2.8, "recommended_mode": "neutral", "est_daily_yield": "1.3% ~ 2.6%"},
+            {"symbol": "SUI/USDT", "alpha_score": 91, "atr_pct": 3.5, "recommended_mode": "neutral", "est_daily_yield": "1.6% ~ 3.2%"},
+            {"symbol": "NEAR/USDT", "alpha_score": 89, "atr_pct": 3.1, "recommended_mode": "neutral", "est_daily_yield": "1.4% ~ 2.8%"}
+        ]
+
+    # 3. Capital-Adaptive Scoring & Sniper Coexistence Filter
+    from grid_engine import is_matching_symbol
+    active_sniper_syms = [
+        t.get("symbol", "")
+        for t in (sniper_engine.state.get("trades", []) if sniper_engine else [])
+        if t.get("status") in ("open", "filled", "pending", "tp1_hit")
+        and (req.is_live or bool(t.get("is_live", False)) == bool(req.is_live))
+    ]
+
+    scored_candidates = []
+    for cand in candidates:
+        sym = cand["symbol"]
+        sym_u = sym.upper()
+
+        # Skip symbols actively traded/ambushed by Sniper Engine so both engines can run simultaneously without collision
+        if len(candidates) > 1 and any(is_matching_symbol(s, sym) for s in active_sniper_syms):
+            continue
+
+        # Filter out high minimum notional assets if balance is micro
+        if avail_bal < 25.0 and "BTC" in sym_u:
+            continue
+        if avail_bal < 15.0 and "ETH" in sym_u:
+            continue
+
+        base_score = float(cand.get("alpha_score", 60))
+        atr = float(cand.get("atr_pct", 2.0))
+        rec_m = cand.get("recommended_mode", "neutral")
+
+        fit_score = base_score + min(25.0, atr * 6.0)
+
+        # Micro-capital affinity bonus for coins with low per-order threshold
+        if avail_bal < 25.0:
+            if any(k in sym_u for k in ["DOGE", "PEPE", "SUI", "XRP", "NEAR", "ADA"]):
+                fit_score += 20.0
+
+        # Preference for Neutral mode (delta-neutral fee capture without directional betting)
+        if rec_m == "neutral":
+            fit_score += 15.0
+
+        scored_candidates.append((fit_score, cand))
+
+    scored_candidates.sort(key=lambda x: x[0], reverse=True)
+    best_cand = None
+    rec_params = None
+    for _, cand in scored_candidates:
+        try:
+            rec_req = GridRecommendRequest(symbol=cand["symbol"], available_balance=avail_bal)
+            rec_params = recommend_grid_parameters(rec_req)
+            best_cand = cand
+            break
+        except Exception:
+            continue
+
+    if not best_cand or not rec_params:
+        best_cand = scored_candidates[0][1] if scored_candidates else candidates[0]
+        try:
+            rec_req = GridRecommendRequest(symbol=best_cand["symbol"], available_balance=avail_bal)
+            rec_params = recommend_grid_parameters(rec_req)
+        except Exception:
+            curr_px = 0.15 if "DOGE" in best_cand["symbol"] else (0.00001 if "PEPE" in best_cand["symbol"] else 1.0)
+            rec_params = {
+                "symbol": best_cand["symbol"],
+                "current_price": curr_px,
+                "recommended_lower": round(curr_px * 0.95, 4),
+                "recommended_upper": round(curr_px * 1.05, 4),
+                "recommended_grid_count": 10,
+                "recommended_spacing": round(curr_px * 0.01, 4),
+                "recommended_size_base": 10.0 if "DOGE" in best_cand["symbol"] else 1.0,
+                "recommended_leverage": 15,
+                "estimated_margin_usd": min(round(avail_bal * 0.45, 2), 5.0),
+                "mode": best_cand.get("recommended_mode", "neutral"),
+                "regime": "ranging",
+                "regime_desc": "高频震荡做市区间",
+                "recommended_action": "auto_shift"
+            }
+
+    if req.preferred_mode and req.preferred_mode.lower() in ("neutral", "long", "short"):
+        rec_params["mode"] = req.preferred_mode.lower()
+
+    # 5. Compile decision breakdown
+    mode_text = {
+        "neutral": "⚖️ 中性双向做市 (不猜多空，震荡反复收割波动差价)",
+        "long": "📈 逢低做多网格 (回踩支撑挂单吸收，反弹止盈)",
+        "short": "📉 逢高做空网格 (高位阻力挂单铺设，回落止盈)"
+    }.get(rec_params["mode"], rec_params["mode"])
+
+    filter_desc = (
+        "已自动识别为微型账户，安全剔除 BTC/ETH 等高门槛合约，锁定单笔成本低、周转率极高的热门标的"
+        if avail_bal < 25
+        else "全市场主流与高波动热门资产深度横向比对，兼顾收益率与流动性"
+    )
+
+    reasoning = [
+        f"💰 账户可用资金：${round(avail_bal, 2)} USDT",
+        f"🛡️ 资金适配度过滤：{filter_desc}",
+        f"🎯 优选做市标的：【{best_cand['symbol']}】（吸金评分 {best_cand.get('alpha_score', 90)}/100，24H ATR 波动率 {best_cand.get('atr_pct', 3.0)}%，预估日化 {best_cand.get('est_daily_yield', '1.5%~3.0%')}）",
+        f"⚙️ 模式与杠杆自适应：【{mode_text}】，安全配置 {rec_params['recommended_leverage']}x 杠杆（预估保证金占用 ${rec_params['estimated_margin_usd']} USD，预留充裕缓冲垫）",
+        f"📐 网格区间架构：[${rec_params['recommended_lower']}, ${rec_params['recommended_upper']}] 共 {rec_params['recommended_grid_count']} 格，采用宽幅 ATR 防洗盘通道与 100% Maker 纯挂单动态移网追踪"
+    ]
+
+    return {
+        "status": "success",
+        "selected_symbol": best_cand["symbol"],
+        "available_balance": round(avail_bal, 2),
+        "reasoning": reasoning,
+        "recommended_params": rec_params
     }
 
 @app.post("/api/grid/reset-stats")
@@ -1477,7 +1795,11 @@ def test_exchange_api(req: ExchangeTestRequest):
             "secret": req.secret.strip(),
             "enableRateLimit": True,
             "timeout": 10000,
-            "options": {"defaultType": "swap"}
+            "has": {"fetchCurrencies": False},
+            "options": {
+                "defaultType": "swap",
+                "fetchCurrencies": False
+            }
         }
         if req.passphrase and req.passphrase.strip():
             ex_params["password"] = req.passphrase.strip()
@@ -1485,7 +1807,7 @@ def test_exchange_api(req: ExchangeTestRequest):
             ex_params["proxies"] = fetcher.proxies
 
         ex = ex_class(ex_params)
-        balance = ex.fetch_balance()
+        balance = ex.fetch_balance({"type": "swap"})
         usdt_free = balance.get("free", {}).get("USDT", 0.0)
         usdt_total = balance.get("total", {}).get("USDT", 0.0)
 
@@ -1727,9 +2049,9 @@ def start_background_monitor():
                 symbols_to_check = set()
                 if sniper_mode != "off" and symbols:
                     symbols_to_check.update(symbols)
-                if grid_engine.running and grid_engine.config:
+                if grid_engine.config:
                     g_sym = grid_engine.config.get("symbol")
-                    if g_sym:
+                    if g_sym and (grid_engine.running or grid_engine.drawdown_stats.get("circuit_breaker_tripped")):
                         symbols_to_check.add(g_sym)
 
                 if symbols_to_check:
@@ -1750,37 +2072,84 @@ def start_background_monitor():
                                         pass
                                 grid_engine.on_price_tick(g_sym, prices_dict[g_sym], exchange=g_live_ex)
 
-                                # Periodic AI Trend & Regime Check (every 10 minutes)
+                                # Periodic AI Multi-Timeframe Resonance & Agile Regime Check (every 30 seconds or on forced trigger)
                                 now_ts = time.time()
-                                if now_ts - getattr(grid_engine, "_last_ai_regime_check", 0.0) >= 600.0:
+                                time_to_check = (now_ts - getattr(grid_engine, "_last_ai_regime_check", 0.0) >= 30.0)
+                                force_check = bool(getattr(grid_engine, "_force_regime_check", False))
+                                if time_to_check or force_check:
                                     grid_engine._last_ai_regime_check = now_ts
+                                    grid_engine._force_regime_check = False
                                     try:
                                         if grid_engine.config.get("out_of_range_action") == "auto_shift":
+                                            df_1d = fetcher.fetch_ohlcv(g_sym, "1d", limit=30)
                                             df_4h = fetcher.fetch_ohlcv(g_sym, "4h", limit=50)
+                                            df_1h = fetcher.fetch_ohlcv(g_sym, "1h", limit=30)
+                                            df_15m = fetcher.fetch_ohlcv(g_sym, "15m", limit=30)
                                             if df_4h is not None and len(df_4h) >= 20:
-                                                regime, strength = detect_market_regime(df_4h)
-                                                curr_mode = grid_engine.config.get("mode", "neutral")
                                                 curr_px = prices_dict[g_sym]
-                                                close_s = df_4h["close"]
-                                                ema20 = float(close_s.ewm(span=20).mean().iloc[-1])
-                                                ema50 = float(close_s.ewm(span=50).mean().iloc[-1]) if len(close_s) >= 50 else ema20
+                                                mtf_info = detect_multi_timeframe_regime(df_1d=df_1d, df_4h=df_4h, df_1h=df_1h, df_15m=df_15m, current_price=curr_px)
+                                                grid_engine.latest_regime_info = mtf_info
+                                                curr_mode = (grid_engine.config.get("mode") or "neutral").lower()
+                                                new_mode = (mtf_info.get("recommended_mode") or "neutral").lower()
+                                                res_score = mtf_info.get("resonance_score", 0)
+                                                tactical_rev = bool(mtf_info.get("tactical_reversal", False))
                                                 
-                                                new_mode = curr_mode
-                                                if regime == "trending_up" or (curr_px > ema20 and ema20 >= ema50):
-                                                    new_mode = "long"
-                                                elif regime == "trending_down" or (curr_px < ema20 and ema20 <= ema50):
-                                                    new_mode = "short"
+                                                # 🛡️ In-Range Defense & Anti-Whipsaw Reversal Guard:
+                                                # 1. Strict In-Range Immunity: While price is INSIDE [lower, upper], NEVER cancel and re-center the grid!
+                                                #    Frequent in-range realignments constantly reset rungs away from price and prevent fills.
+                                                # 2. Minimum Cooldown: Outside-range mode realignment requires at least 600s (10 min) cooldown.
+                                                is_opposite_flip = (curr_mode == "long" and new_mode == "short") or (curr_mode == "short" and new_mode == "long")
+                                                is_to_neutral = (curr_mode in ["long", "short"] and new_mode == "neutral")
+                                                is_from_neutral = (curr_mode == "neutral" and new_mode in ["long", "short"])
+
+                                                g_lower = float(grid_engine.config.get("lower", 0.0))
+                                                g_upper = float(grid_engine.config.get("upper", 0.0))
+                                                is_inside_range = (g_lower > 0 and g_upper > 0 and g_lower <= curr_px <= g_upper)
+
+                                                min_cooldown = 600.0
+                                                last_flip = getattr(grid_engine, "_last_mode_flip_ts", 0.0)
+                                                cooldown_ok = (now_ts - last_flip) >= min_cooldown
                                                 
-                                                if new_mode != curr_mode and strength >= 60:
-                                                    span = max((df_4h["high"].iloc[-14:] - df_4h["low"].iloc[-14:]).mean(), curr_px * 0.025)
+                                                should_realign = False
+                                                if not is_inside_range and cooldown_ok and new_mode != curr_mode:
+                                                    if is_opposite_flip and (abs(res_score) >= 40 or tactical_rev):
+                                                        should_realign = True
+                                                    elif is_to_neutral and abs(res_score) <= 20:
+                                                        should_realign = True
+                                                    elif is_from_neutral and abs(res_score) >= 40:
+                                                        should_realign = True
+
+                                                # If live grid has no initial position and auto_open_initial_position is disabled,
+                                                # keep mode="neutral" so both BUY and SELL rungs are placed on the book.
+                                                if should_realign and grid_engine.config.get("is_live") and not grid_engine.config.get("auto_open_initial_position"):
+                                                    if abs(float(grid_engine.inventory.get("position_qty", 0.0))) < 1e-9:
+                                                        new_mode = "neutral"
+                                                        if curr_mode == "neutral":
+                                                            should_realign = False
+
+                                                if should_realign:
+                                                    grid_engine._last_mode_flip_ts = now_ts
+                                                    g_count = int(grid_engine.config.get("grid_count", 10))
+                                                    atr_4h = float((df_4h["high"].iloc[-14:] - df_4h["low"].iloc[-14:]).mean()) if len(df_4h) >= 14 else curr_px * 0.05
+                                                    existing_span = (g_upper - g_lower) if (g_upper > g_lower > 0) else 0.0
+                                                    wide_half_span = max(existing_span * 0.5, atr_4h * 1.5, curr_px * 0.07)
                                                     prec, _ = get_symbol_precisions(g_sym, curr_px)
                                                     if new_mode == "long":
-                                                        new_l = round(max(curr_px * 0.2, curr_px - 3.2 * span), prec)
-                                                        new_u = round(curr_px + 2.0 * span, prec)
+                                                        new_l = round(max(curr_px * 0.2, curr_px - 1.3 * wide_half_span), prec)
+                                                        new_u = round(curr_px + 0.7 * wide_half_span, prec)
+                                                    elif new_mode == "short":
+                                                        new_l = round(max(curr_px * 0.2, curr_px - 0.7 * wide_half_span), prec)
+                                                        new_u = round(curr_px + 1.3 * wide_half_span, prec)
                                                     else:
-                                                        new_l = round(max(curr_px * 0.2, curr_px - 2.0 * span), prec)
-                                                        new_u = round(curr_px + 3.2 * span, prec)
+                                                        new_l = round(max(curr_px * 0.2, curr_px - 1.0 * wide_half_span), prec)
+                                                        new_u = round(curr_px + 1.0 * wide_half_span, prec)
                                                     
+                                                    if new_u <= new_l:
+                                                        min_s = 10 ** (-prec) if prec > 0 else 1.0
+                                                        new_u = round(new_l + max(min_s * g_count, curr_px * 0.14), prec)
+                                                    
+                                                    reversal_tag = "🚨行情极速反转" if tactical_rev else "🤖AI多周期研判转向"
+                                                    reason_msg = f"{reversal_tag}：从【{curr_mode.upper()}】切换至【{new_mode.upper()}】({mtf_info['regime_title']})，平掉原方向持仓并重新定轴做市！"
                                                     grid_engine.realign_grid_with_ai(
                                                         symbol=g_sym,
                                                         new_mode=new_mode,
@@ -1788,10 +2157,43 @@ def start_background_monitor():
                                                         new_upper=new_u,
                                                         current_price=curr_px,
                                                         exchange=g_live_ex,
-                                                        reason=f"4H形态反转为 {new_mode.upper()} (强度 {strength}/100)"
+                                                        reason=reason_msg
                                                     )
                                     except Exception as ai_realign_err:
-                                        logger.debug(f"[GridEngine] AI regime check notice: {ai_realign_err}")
+                                        logger.debug(f"[GridEngine] AI MTF regime check notice: {ai_realign_err}")
+
+                        # 🔄 Auto-Resume after 15-minute Circuit Breaker Cooldown (Strictly manual by default, no death-loop restart)
+                        elif not grid_engine.running and grid_engine.config and grid_engine.drawdown_stats.get("circuit_breaker_tripped"):
+                            auto_resume_allowed = bool(grid_engine.drawdown_stats.get("auto_resume_after_breaker", False)) and bool(grid_engine.config.get("auto_resume_after_breaker", False))
+                            g_sym = grid_engine.config.get("symbol")
+                            tripped_at = float(grid_engine.drawdown_stats.get("circuit_breaker_tripped_at", 0.0))
+                            cooldown_sec = float(grid_engine.drawdown_stats.get("circuit_breaker_cooldown_sec", 900.0))
+                            if auto_resume_allowed and time.time() - tripped_at >= cooldown_sec and g_sym in prices_dict:
+                                try:
+                                    curr_px = prices_dict[g_sym]
+                                    df_1d = fetcher.fetch_ohlcv(g_sym, "1d", limit=30)
+                                    df_4h = fetcher.fetch_ohlcv(g_sym, "4h", limit=50)
+                                    df_1h = fetcher.fetch_ohlcv(g_sym, "1h", limit=30)
+                                    df_15m = fetcher.fetch_ohlcv(g_sym, "15m", limit=30)
+                                    if df_4h is not None and len(df_4h) >= 20:
+                                        mtf_info = detect_multi_timeframe_regime(df_1d=df_1d, df_4h=df_4h, df_1h=df_1h, df_15m=df_15m, current_price=curr_px)
+                                        span = max(float((df_4h["high"].iloc[-14:] - df_4h["low"].iloc[-14:]).mean()) * 1.5, curr_px * 0.07)
+                                    else:
+                                        mtf_info = {
+                                            "recommended_mode": grid_engine.config.get("mode", "neutral"),
+                                            "regime_title": "震荡市(自适应默认)",
+                                            "resonance_score": 0
+                                        }
+                                        span = curr_px * 0.07
+                                    g_live_ex = None
+                                    if grid_engine.config.get("is_live"):
+                                        try:
+                                            g_live_ex, _ = sniper_engine._init_live_ccxt()
+                                        except Exception:
+                                            pass
+                                    grid_engine.resume_after_circuit_breaker(curr_px, mtf_info, span, exchange=g_live_ex)
+                                except Exception as cb_resume_err:
+                                    logger.warning(f"[GridEngine] Circuit breaker auto-resume notice: {cb_resume_err}")
             except Exception as e:
                 logger.warning(f"[FastPriceCheck] Error in loop: {e}")
             time.sleep(poll_interval)

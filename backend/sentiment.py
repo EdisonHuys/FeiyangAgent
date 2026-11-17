@@ -98,32 +98,44 @@ def fetch_funding_rates(symbols: List[str], exchange_id: str = "binance") -> Opt
         # Create a dedicated futures/swap exchange instance for funding rate queries.
         # The data_fetcher uses 'spot' type, which cannot reliably fetch funding rates.
         proxy_url = os.environ.get("HTTP_PROXY") or os.environ.get("HTTPS_PROXY") or os.environ.get("http_proxy") or os.environ.get("https_proxy")
-        config = {
-            'enableRateLimit': True,
-            'timeout': 5000,
-            'options': {
-                'defaultType': 'future',
-            }
-        }
-        if proxy_url:
-            config['proxies'] = {
-                'http': proxy_url,
-                'https': proxy_url
-            }
-        ex_class = getattr(ccxt, exchange_id)
-        exchange = ex_class(config)
-
+        candidate_exchanges = [exchange_id.lower()] + [ex for ex in ("okx", "gate") if ex != exchange_id.lower()]
         rates = {}
-        for symbol in symbols:
+
+        for cand_ex_id in candidate_exchanges:
             try:
-                # ccxt fetch_funding_rate for perpetual swaps
-                swap_symbol = f"{symbol}:USDT" if ":" not in symbol else symbol
-                fr = exchange.fetch_funding_rate(swap_symbol)
-                if fr and fr.get("fundingRate") is not None:
-                    rates[symbol] = round(float(fr["fundingRate"]), 6)
+                config = {
+                    'enableRateLimit': True,
+                    'timeout': 6000,
+                    'has': {'fetchCurrencies': False},
+                    'options': {
+                        'defaultType': 'swap' if cand_ex_id in ('okx', 'gate') else 'future',
+                        'fetchCurrencies': False,
+                    }
+                }
+                if proxy_url:
+                    config['proxies'] = {
+                        'http': proxy_url,
+                        'https': proxy_url
+                    }
+                ex_class = getattr(ccxt, cand_ex_id)
+                exchange = ex_class(config)
+
+                for symbol in symbols:
+                    if symbol in rates:
+                        continue
+                    try:
+                        swap_symbol = f"{symbol}:USDT" if ":" not in symbol else symbol
+                        fr = exchange.fetch_funding_rate(swap_symbol)
+                        if fr and fr.get("fundingRate") is not None:
+                            rates[symbol] = round(float(fr["fundingRate"]), 6)
+                    except Exception as sym_e:
+                        if "451" in str(sym_e) or "403" in str(sym_e) or "restricted location" in str(sym_e):
+                            break
+                        pass
+                if len(rates) == len(symbols):
+                    break
             except Exception:
-                # Some exchanges/symbols don't support funding rate
-                pass
+                continue
 
         if rates:
             _cache_set(cache_key, rates)
